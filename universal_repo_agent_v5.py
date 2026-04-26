@@ -843,6 +843,8 @@ def detect_node_service(path: Path) -> Optional[ServiceInfo]:
         pkg_data = json.loads(pkg_raw)
     except Exception:
         pkg_data = {}
+    if is_node_library(pkg_data):
+        return None
     scripts = pkg_data.get("scripts", {})
     all_deps = {**pkg_data.get("dependencies", {}), **pkg_data.get("devDependencies", {})} if isinstance(pkg_data, dict) else {}
     dep_names = set(all_deps.keys())
@@ -967,6 +969,36 @@ ALL_DETECTORS = [detect_node_service, detect_python_service, detect_docker_servi
 
 
 EXAMPLE_DIRS = {"examples", "example", "demo", "demos", "samples", "sample", "tutorials", "tutorial", "docs", "documentation"}
+
+
+def is_node_library(pkg_data: dict) -> bool:
+    """Detecta si un package.json correspon a una llibreria/tool Node, no una app arrencable.
+
+    Puntuació basada en camps estàtics del manifest (sense llegir codi font):
+      +2  "files"          — declara subset npm-publish; apps no necessiten això
+      +1  "peerDependencies" no buit — plugins/extensors; apps rarament ho declaren
+      +1  "exports"        — mapa ESM explícit; apps rarament el declaren
+      +1  "publishConfig"  — configura el registre npm → es publica → és una lib
+      +1  cap script runnable (start/dev/serve/preview) → no té punt d'arrencada
+      -1  "private": true  → no es publica → probablement app o arrel de monorepo
+
+    Llindar: score >= 2 → és una llibreria (retorna None al detector).
+    """
+    score = 0
+    if "files" in pkg_data:
+        score += 2
+    if pkg_data.get("peerDependencies"):
+        score += 1
+    if "exports" in pkg_data:
+        score += 1
+    if "publishConfig" in pkg_data:
+        score += 1
+    scripts = pkg_data.get("scripts", {})
+    if not any(k in scripts for k in ("start", "dev", "serve", "preview")):
+        score += 1
+    if pkg_data.get("private"):
+        score -= 1
+    return score >= 2
 
 
 def is_library_package_root(root: Path) -> bool:
