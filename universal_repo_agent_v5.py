@@ -1728,7 +1728,9 @@ def load_services_registry(workspace: Path) -> Dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        # Neteja claus amb llista buida (herència de stops anteriors amb codi antic)
+        return {k: v for k, v in data.items() if v}
     except Exception:
         return {}
 
@@ -1777,7 +1779,7 @@ def stop_services(workspace: Path, repo_name: str = "all") -> None:
             except Exception as e:
                 warn(f"No s'ha pogut aturar PID {pid}: {e}")
         if name in data:
-            data[name] = []
+            del data[name]
     save_services_registry(workspace, data)
     info(f"Total serveis aturats: {stopped}")
 
