@@ -87,16 +87,20 @@ ask_confirm() {
 }
 
 detect_bridge_token() {
-    local pid
+    local pid tmpfile token
     pid=$(pgrep -f "agent_http_bridge.py" 2>/dev/null | head -1)
-    [ -z "$pid" ] && { echo ""; return; }
-    if [ -e "/proc/$pid/environ" ] && [ ! -r "/proc/$pid/environ" ]; then
-        echo "__PERM_DENIED__"
-        return
+    [ -z "$pid" ] && { echo ""; return 0; }
+    tmpfile=$(mktemp)
+    # cat obre el fitxer (no bash), de manera que el seu stderr
+    # es pot redirigir correctament. Si falla (Permission denied), retorna buit.
+    if ! cat "/proc/$pid/environ" > "$tmpfile" 2>/dev/null; then
+        rm -f "$tmpfile"
+        echo ""
+        return 0
     fi
-    [ -r "/proc/$pid/environ" ] || { echo ""; return; }
-    tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | \
-        grep "^BRIDGE_AUTH_TOKEN=" | cut -d= -f2-
+    token=$(tr '\0' '\n' < "$tmpfile" | grep "^BRIDGE_AUTH_TOKEN=" | cut -d= -f2- || true)
+    rm -f "$tmpfile"
+    echo "$token"
 }
 
 test_bridge_health() {
@@ -236,11 +240,6 @@ fi
 header "2. /health del bridge"
 BRIDGE_URL="http://${BRIDGE_HOST}:${BRIDGE_PORT}"
 DETECTED_TOKEN=$(detect_bridge_token)
-TOKEN_PERM_DENIED=0
-if [ "$DETECTED_TOKEN" = "__PERM_DENIED__" ]; then
-    TOKEN_PERM_DENIED=1
-    DETECTED_TOKEN=""
-fi
 BRIDGE_TOKEN=""
 
 RESP=$(test_bridge_health "$BRIDGE_URL/health" "")
@@ -259,11 +258,7 @@ elif echo "$RESP" | grep -qi "unauthorized\|401\|auth"; then
             fail "Token detectat no funciona"
         fi
     else
-        if [ $TOKEN_PERM_DENIED -eq 1 ]; then
-            sublog "ℹ️  Token no llegible des d'aquest shell (normal). Pas 5 validarà la connectivitat real."
-        else
-            warn "No es pot detectar el token"
-        fi
+        sublog "ℹ️  Token no llegible des d'aquest shell. Pas 5 validarà la connectivitat real."
     fi
 elif [ -z "$RESP" ] && [ -n "$BRIDGE_PID" ]; then
     fail "Bridge corre però no respon"
