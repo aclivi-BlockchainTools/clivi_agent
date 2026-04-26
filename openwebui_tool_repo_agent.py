@@ -1,10 +1,11 @@
 """
 title: Universal Repo Agent
 author: usuari
-version: 2.3
+version: 2.4
 description: Pont a l'agent universal local. Suporta async, exec_shell amb confirmació i upload de ZIPs.
 """
 import json
+import os
 import urllib.request
 import urllib.error
 from typing import Optional
@@ -14,13 +15,20 @@ class Tools:
     def __init__(self):
         self.bridge_url = "http://host.docker.internal:9090"
         self.timeout = 30
+        self._auth_token = os.environ.get("BRIDGE_AUTH_TOKEN", "")
 
     # ---------- helpers ----------
+    def _headers(self) -> dict:
+        h = {"Content-Type": "application/json"}
+        if self._auth_token:
+            h["X-Auth-Token"] = self._auth_token
+        return h
+
     def _post(self, path: str, payload: dict, timeout: Optional[int] = None) -> dict:
         url = self.bridge_url + path
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, method="POST",
-                                     headers={"Content-Type": "application/json"})
+                                     headers=self._headers())
         try:
             with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
                 return json.loads(r.read().decode("utf-8"))
@@ -34,8 +42,9 @@ class Tools:
 
     def _get(self, path: str, timeout: Optional[int] = None) -> dict:
         url = self.bridge_url + path
+        req = urllib.request.Request(url, headers=self._headers())
         try:
-            with urllib.request.urlopen(url, timeout=timeout or self.timeout) as r:
+            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
                 return json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             try:
@@ -167,8 +176,13 @@ class Tools:
         L'usuari obre la URL al navegador, arrossega un .zip i obte la ruta al host.
         Despres pot cridar executa_repo_async amb aquesta ruta.
         """
-        return ("Obre aquesta URL al navegador per pujar un ZIP:\n"
-                "  http://192.168.0.164:9090/upload\n"
-                "  (o http://localhost:9090/upload si ets al mateix host)\n\n"
-                "Un cop pujat, copia la ruta retornada i crida:\n"
-                "  executa_repo_async('/ruta/al/zip/que/has/pujat.zip')")
+        health = self._get("/health", timeout=10)
+        public_url = health.get("public_url", "")
+        if public_url:
+            upload_url = public_url.rstrip("/") + "/upload"
+        else:
+            upload_url = "(no s'ha pogut determinar la IP del host — comprova que el bridge corre i és accessible)"
+        return (f"Obre aquesta URL al navegador per pujar un ZIP:\n"
+                f"  {upload_url}\n\n"
+                f"Un cop pujat, copia la ruta retornada i crida:\n"
+                f"  executa_repo_async('/ruta/al/zip/que/has/pujat.zip')")
