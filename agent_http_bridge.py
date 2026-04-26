@@ -37,6 +37,22 @@ WORKSPACE = Path(os.environ.get(
 AUTH_TOKEN = os.environ.get("BRIDGE_AUTH_TOKEN", "")
 MAX_RESPONSE_CHARS = 6000
 LAUNCH_TIMEOUT = 1500
+_PORT = 9090
+
+
+def _get_public_url(port: int = 9090) -> str:
+    override = os.environ.get("BRIDGE_PUBLIC_URL", "").strip()
+    if override:
+        return override
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        ip = "127.0.0.1"
+    return f"http://{ip}:{port}"
 
 _JOBS: Dict[str, Dict[str, Any]] = {}
 _JOBS_LOCK = threading.Lock()
@@ -281,7 +297,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/health":
             self._json(200, {"status": "ok", "agent_path": str(AGENT_PATH),
-                             "agent_exists": AGENT_PATH.exists(), "workspace": str(WORKSPACE)})
+                             "agent_exists": AGENT_PATH.exists(), "workspace": str(WORKSPACE),
+                             "public_url": _get_public_url(_PORT)})
         elif parsed.path == "/status":
             self._json(200, _run_agent(["--workspace", str(WORKSPACE), "--status"], timeout=30))
         elif parsed.path == "/logs":
@@ -383,10 +400,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    global _PORT
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, default=9090)
     p.add_argument("--bind", default="0.0.0.0")
     args = p.parse_args()
+    _PORT = args.port
     print(f"🔗 Agent HTTP Bridge (async)")
     print(f"   Workspace  : {WORKSPACE}")
     print(f"   Agent path : {AGENT_PATH} (exists: {AGENT_PATH.exists()})")
