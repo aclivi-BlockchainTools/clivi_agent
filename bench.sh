@@ -43,7 +43,7 @@ for entry in "${REPOS[@]}"; do
     printf "▶️  [%-20s] %-9s ... " "$name" "$kind"
     REPO_START=$(date +%s)
     if [ "$kind" = "analyze" ]; then
-        timeout "$timeout" python3 "$AGENT" --input "$url" --workspace "$WORKSPACE" --no-readme --no-model-refine > "$TMPLOG" 2>&1
+        timeout "$timeout" python3 "$AGENT" --input "$url" --workspace "$WORKSPACE" --approve-all --non-interactive --no-readme --no-model-refine > "$TMPLOG" 2>&1
     else
         timeout "$timeout" python3 "$AGENT" --input "$url" --workspace "$WORKSPACE" --execute --approve-all --non-interactive --no-readme --no-model-refine > "$TMPLOG" 2>&1
     fi
