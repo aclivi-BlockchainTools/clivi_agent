@@ -222,9 +222,12 @@ UPLOAD_HTML = """<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Upload ZIP</title>
 <style>body{font-family:system-ui;max-width:680px;margin:40px auto;padding:0 20px}
 .drop{border:2px dashed #888;border-radius:14px;padding:50px 20px;text-align:center;background:#fff;cursor:pointer}
-.drop.over{border-color:#2563eb;background:#eff6ff}.btn{background:#2563eb;color:#fff;border:0;padding:10px 20px;border-radius:8px;cursor:pointer}
+.drop.over{border-color:#2563eb;background:#eff6ff}
+.btn{background:#2563eb;color:#fff;border:0;padding:10px 20px;border-radius:8px;cursor:pointer}
+.btn-sm{background:#2563eb;color:#fff;border:0;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:12px;margin-top:4px}
 .result{margin-top:20px;padding:15px;border-radius:8px;font-family:monospace;font-size:13px;white-space:pre-wrap}
-.ok{background:#d1fae5}.err{background:#fee2e2}</style></head><body>
+.ok{background:#d1fae5}.err{background:#fee2e2}
+code{background:#c6f6d5;padding:2px 6px;border-radius:4px;word-break:break-all}</style></head><body>
 <h1>Upload ZIP al host</h1><p>Arrossega un .zip o clica per seleccionar.</p>
 <div class="drop" id="drop"><p>Arrossega un .zip aquí, o clica</p>
 <input type="file" id="file" accept=".zip" style="display:none">
@@ -237,14 +240,40 @@ file.onchange=()=>upload(file.files[0]);
 ['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('over')}));
 ['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('over')}));
 drop.addEventListener('drop',e=>upload(e.dataTransfer.files[0]));
+function _copy(btn,txt){
+  navigator.clipboard.writeText(txt)
+    .then(()=>{btn.textContent='✓ Copiat!';setTimeout(()=>{btn.textContent=btn.dataset.label},2000)})
+    .catch(()=>{btn.textContent='(selecciona i copia manualment)';});
+}
 async function upload(f){
-  if(!f||!f.name.toLowerCase().endsWith('.zip')){result.className='result err';result.textContent='Cal un .zip';return}
-  result.className='result';result.textContent='Pujant '+f.name+'...';
+  if(!f||!f.name.toLowerCase().endsWith('.zip')){
+    result.className='result err';result.textContent='❌ Cal un fitxer .zip';return;
+  }
+  result.className='result';result.textContent='⏳ Pujant '+f.name+' ('+f.size+' bytes)...';
   const fd=new FormData();fd.append('file',f);
-  try{const r=await fetch('/upload',{method:'POST',body:fd});const d=await r.json();
-    if(d.error){result.className='result err';result.textContent=d.error}
-    else{result.className='result ok';result.textContent='OK!\n\nRuta: '+d.path+'\n\nAl xat:\n  Executa amb repo_agent el fitxer '+d.path}
-  }catch(e){result.className='result err';result.textContent=e}
+  try{
+    const r=await fetch('/upload',{method:'POST',body:fd});
+    const d=await r.json();
+    if(d.error){
+      result.className='result err';
+      result.textContent='❌ Error del servidor: '+d.error;
+    } else {
+      const path=d.path,name=path.split('/').pop(),bartolo='munta el repo '+path;
+      result.className='result ok';
+      result.innerHTML=
+        '<b>✅ Fitxer pujat correctament</b>\n'
+        +'Nom: '+name+'\nMida: '+f.size+' bytes\nRuta: '+path+'\n\n'
+        +'<button class="btn-sm" id="cp1" data-label="📋 Copia la ruta">📋 Copia la ruta</button>\n\n'
+        +'Text per a Bartolo:\n<code>'+bartolo+'</code>\n'
+        +'<button class="btn-sm" id="cp2" data-label="📋 Copia text Bartolo">📋 Copia text Bartolo</button>';
+      document.getElementById('cp1').onclick=function(){_copy(this,path)};
+      document.getElementById('cp2').onclick=function(){_copy(this,bartolo)};
+    }
+  }catch(err){
+    result.className='result err';
+    result.textContent='❌ Error de xarxa: '+(err.message||String(err));
+    console.error('[upload]',err);
+  }
 }
 </script></body></html>"""
 
