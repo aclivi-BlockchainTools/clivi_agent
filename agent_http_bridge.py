@@ -96,22 +96,24 @@ def _run_agent_async(job_id: str, args: list, timeout: int) -> None:
             proc.kill()
             rc = -1
             output_lines.append(f"\n[bridge] TIMEOUT {timeout}s\n")
-        with _JOBS_LOCK:
-            _JOBS[job_id]["returncode"] = rc
-            _JOBS[job_id]["output"] = "".join(output_lines)
-            _JOBS[job_id]["status"] = "done" if rc == 0 else "failed"
-            _JOBS[job_id]["finished_at"] = _time.time()
+        # Parse escalation reports BEFORE marking the job done/failed so that
+        # _job_snapshot() always sees error_reports already populated.
+        error_reports: list = []
         if rc != 0:
             import re as _re, json as _json
             full_out = "".join(output_lines)
             for _path_str in _re.findall(r"__ESCALATION_REPORT__=(.+)", full_out):
                 try:
                     with open(_path_str.strip()) as _f:
-                        _report_data = _json.load(_f)
-                    with _JOBS_LOCK:
-                        _JOBS[job_id]["error_reports"].append(_report_data)
-                except Exception:
-                    pass
+                        error_reports.append(_json.load(_f))
+                except Exception as _err:
+                    sys.stderr.write(f"[bridge] escalation parse error: {_err}\n")
+        with _JOBS_LOCK:
+            _JOBS[job_id]["returncode"] = rc
+            _JOBS[job_id]["output"] = "".join(output_lines)
+            _JOBS[job_id]["status"] = "done" if rc == 0 else "failed"
+            _JOBS[job_id]["finished_at"] = _time.time()
+            _JOBS[job_id]["error_reports"] = error_reports
     except Exception as e:
         with _JOBS_LOCK:
             _JOBS[job_id]["status"] = "failed"
