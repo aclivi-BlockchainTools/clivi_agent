@@ -77,10 +77,25 @@ class Tools:
         r = self._get(f"/job/{job_id}", timeout=15)
         if "error" in r:
             return f"Error: {r['error']}"
+        status = r.get("status")
+        if status == "failed" and r.get("error_reports"):
+            rep = r["error_reports"][0]
+            n = len(rep.get("repair_attempts", []))
+            step = rep.get("failed_step", {})
+            return (
+                f"❌ No he pogut arreglar l'error automàticament.\n\n"
+                f"**Step fallit**: {step.get('title', '?')} "
+                f"(`{step.get('command', '?')}`)\n"
+                f"**Error**: {rep.get('error_summary', '')}\n"
+                f"**Intentat**: {n} reparació{'ns' if n != 1 else ''}\n"
+                f"**Diagnòstic Qwen**: {rep.get('diagnosis', '')}\n\n"
+                f"**Per escalar a Claude Code**, copia aquest prompt:\n"
+                f"```\n{rep.get('claude_code_prompt', '')}\n```"
+            )
         out = r.get("stdout") or r.get("output") or ""
         if len(out) > 4000:
             out = out[-4000:]
-        return (f"Estat: {r.get('status')}\n"
+        return (f"Estat: {status}\n"
                 f"Returncode: {r.get('returncode')}\n"
                 f"Iniciada: {r.get('started_at')}\n"
                 f"Acabada: {r.get('finished_at')}\n"

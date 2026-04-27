@@ -101,6 +101,17 @@ def _run_agent_async(job_id: str, args: list, timeout: int) -> None:
             _JOBS[job_id]["output"] = "".join(output_lines)
             _JOBS[job_id]["status"] = "done" if rc == 0 else "failed"
             _JOBS[job_id]["finished_at"] = _time.time()
+        if rc != 0:
+            import re as _re, json as _json
+            full_out = "".join(output_lines)
+            for _path_str in _re.findall(r"__ESCALATION_REPORT__=(.+)", full_out):
+                try:
+                    with open(_path_str.strip()) as _f:
+                        _report_data = _json.load(_f)
+                    with _JOBS_LOCK:
+                        _JOBS[job_id]["error_reports"].append(_report_data)
+                except Exception:
+                    pass
     except Exception as e:
         with _JOBS_LOCK:
             _JOBS[job_id]["status"] = "failed"
@@ -117,7 +128,8 @@ def _start_job(args: list, timeout: int = LAUNCH_TIMEOUT) -> str:
     with _JOBS_LOCK:
         _JOBS[job_id] = {"id": job_id, "status": "queued", "args": args, "output": "",
                          "returncode": None, "pid": None,
-                         "started_at": _time.time(), "finished_at": None}
+                         "started_at": _time.time(), "finished_at": None,
+                         "error_reports": []}
     threading.Thread(target=_run_agent_async, args=(job_id, args, timeout), daemon=True).start()
     return job_id
 
@@ -130,10 +142,13 @@ def _job_snapshot(job_id: str, tail_chars: int = MAX_RESPONSE_CHARS) -> Optional
         out = job["output"]
         if len(out) > tail_chars:
             out = f"... [truncat {len(out) - tail_chars} chars abans] ...\n" + out[-tail_chars:]
+        reports = job.get("error_reports", [])
         return {"id": job["id"], "status": job["status"], "returncode": job["returncode"],
                 "pid": job["pid"], "started_at": job["started_at"],
                 "finished_at": job["finished_at"], "output": out,
-                "ok": job["status"] == "done" and job["returncode"] == 0}
+                "ok": job["status"] == "done" and job["returncode"] == 0,
+                "error_reports": reports,
+                "escalation_prompts": [r.get("claude_code_prompt", "") for r in reports]}
 
 
 def _run_agent(args: list, timeout: int = 60) -> dict:

@@ -2497,6 +2497,7 @@ def execute_plan(analysis: RepoAnalysis, plan: ExecutionPlan, model: str, worksp
         warn(f"Step failed with code {current_result.returncode}.")
         diagnosis = diagnose_error_with_model(model, step, current_result)
         repaired = False
+        _repair_attempts: list = []
         for attempt in range(1, MAX_REPAIR_ATTEMPTS + 1):
             fix_cmd = ask_model_for_repair(model, analysis, step, current_result)
             if not fix_cmd:
@@ -2516,6 +2517,7 @@ def execute_plan(analysis: RepoAnalysis, plan: ExecutionPlan, model: str, worksp
             repair_result.repaired = True
             results.append(repair_result)
             write_log(log_dir, f"{idx:02d}_{slugify(step.id)}_repair{attempt}.log", f"REPAIR COMMAND: {fix_to_run}\nCWD: {repair_result.cwd}\nRETURNCODE: {repair_result.returncode}\n\nSTDOUT:\n{repair_result.stdout}\n\nSTDERR:\n{repair_result.stderr}\n")
+            _repair_attempts.append({"attempt": attempt, "command": fix_cmd, "returncode": repair_result.returncode, "stderr_tail": tail_lines(repair_result.stderr, 5)})
             success = repair_result.returncode == 0
             if success and fix_bg:
                 pid = _extract_agent_pid(repair_result.stdout)
@@ -2533,6 +2535,25 @@ def execute_plan(analysis: RepoAnalysis, plan: ExecutionPlan, model: str, worksp
                 break
             current_result = repair_result
         errors.append(StepError(step_id=step.id, step_title=step.title, command=step.command, cwd=step.cwd, returncode=current_result.returncode, stdout_tail=tail_lines(current_result.stdout, 8), stderr_tail=tail_lines(current_result.stderr, 8), diagnosis=diagnosis, repaired=repaired))
+        if not repaired:
+            try:
+                import sys as _sys
+                _sys.path.insert(0, str(Path(__file__).parent))
+                from agents.error_reporter import ErrorReporter as _ER
+                _stack = ", ".join(sorted({s.service_type for s in analysis.services}))
+                _reporter = _ER(workspace=workspace)
+                _report = _reporter.generate(
+                    step_error=errors[-1],
+                    repair_attempts=_repair_attempts,
+                    repo_root=repo_root,
+                    repo_name=analysis.repo_name,
+                    stack_name=_stack,
+                    missing_deps=list(analysis.missing_system_deps),
+                    full_stderr=tail_lines(current_result.stderr, 20),
+                )
+                _reporter.save_and_print(_report)
+            except Exception as _re:
+                warn(f"ErrorReporter: {_re}")
         if step.critical and not repaired:
             raise AgentError(f"Critical step failed: {step.title}")
     return results, errors
