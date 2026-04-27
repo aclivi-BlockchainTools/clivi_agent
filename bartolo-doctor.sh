@@ -30,7 +30,10 @@ BRIDGE_PORT="${BRIDGE_PORT:-9090}"
 OLLAMA_HOST="${OLLAMA_HOST:-localhost}"
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"
 OPENWEBUI_CONTAINER="${OPENWEBUI_CONTAINER:-open-webui}"
-EXPECTED_MODEL="${EXPECTED_MODEL:-qwen2.5-coder:14b}"
+COMPATIBLE_MODELS=("qwen2.5:14b" "qwen2.5:7b" "llama3.1:8b" "qwen3:8b")
+INCOMPATIBLE_MODELS=("qwen2.5-coder:14b" "mistral-nemo:12b")
+RECOMMENDED_MODEL="${COMPATIBLE_MODELS[0]}"
+# EXPECTED_MODEL env var: override per a models nous que encara no estan a la llista
 EXPECTED_TOOL_VERSION="${EXPECTED_TOOL_VERSION:-2.4}"
 AGENT_DIR="${AGENT_DIR:-$HOME/universal-agent}"
 BRIDGE_SCRIPT="${BRIDGE_SCRIPT:-$AGENT_DIR/agent_http_bridge.py}"
@@ -84,14 +87,20 @@ ask_confirm() {
 }
 
 detect_bridge_token() {
-    local pid
-    pid=$(pgrep -f "agent_http_bridge.py" | head -1)
-    if [ -z "$pid" ] || [ ! -r "/proc/$pid/environ" ]; then
+    local pid tmpfile token
+    pid=$(pgrep -f "agent_http_bridge.py" 2>/dev/null | head -1)
+    [ -z "$pid" ] && { echo ""; return 0; }
+    tmpfile=$(mktemp)
+    # cat obre el fitxer (no bash), de manera que el seu stderr
+    # es pot redirigir correctament. Si falla (Permission denied), retorna buit.
+    if ! cat "/proc/$pid/environ" > "$tmpfile" 2>/dev/null; then
+        rm -f "$tmpfile"
         echo ""
-        return
+        return 0
     fi
-    tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | \
-        grep "^BRIDGE_AUTH_TOKEN=" | cut -d= -f2-
+    token=$(tr '\0' '\n' < "$tmpfile" | grep "^BRIDGE_AUTH_TOKEN=" | cut -d= -f2- || true)
+    rm -f "$tmpfile"
+    echo "$token"
 }
 
 test_bridge_health() {
@@ -176,11 +185,12 @@ fix_arrenca_ollama() {
 }
 
 fix_pull_model() {
-    fix_attempt "Descarregar $EXPECTED_MODEL"
+    local target="${EXPECTED_MODEL:-$RECOMMENDED_MODEL}"
+    fix_attempt "Descarregar $target"
     if ! ask_confirm "Descarregar ~8 GB"; then
         return 1
     fi
-    if ollama pull "$EXPECTED_MODEL"; then
+    if ollama pull "$target"; then
         fix_done "Model descarregat"
         return 0
     fi
@@ -248,7 +258,7 @@ elif echo "$RESP" | grep -qi "unauthorized\|401\|auth"; then
             fail "Token detectat no funciona"
         fi
     else
-        warn "No es pot detectar el token (cal accés a /proc/PID/environ)"
+        sublog "ℹ️  Token no llegible des d'aquest shell. Pas 5 validarà la connectivitat real."
     fi
 elif [ -z "$RESP" ] && [ -n "$BRIDGE_PID" ]; then
     fail "Bridge corre però no respon"
@@ -282,14 +292,45 @@ fi
 
 if [ -n "$OLLAMA_RESP" ]; then
     pass "Ollama respon"
-    if echo "$OLLAMA_RESP" | grep -q "$EXPECTED_MODEL"; then
-        pass "Model $EXPECTED_MODEL carregat"
-    else
-        warn "Model $EXPECTED_MODEL NO present"
-        if [ $FIX_MODE -eq 1 ] && command -v ollama >/dev/null; then
-            fix_pull_model
+    if [ -n "${EXPECTED_MODEL:-}" ]; then
+        # Override explícit via env var (per a models nous no a la llista)
+        if echo "$OLLAMA_RESP" | grep -q "$EXPECTED_MODEL"; then
+            pass "Model $EXPECTED_MODEL carregat (override)"
         else
+            warn "Model $EXPECTED_MODEL NO present"
+            if [ $FIX_MODE -eq 1 ] && command -v ollama >/dev/null; then fix_pull_model; fi
             MANUAL_FIXES+=("ollama pull $EXPECTED_MODEL")
+        fi
+    else
+        FOUND_COMPATIBLE=""
+        for _m in "${COMPATIBLE_MODELS[@]}"; do
+            if echo "$OLLAMA_RESP" | grep -q "$_m"; then
+                FOUND_COMPATIBLE="$_m"
+                break
+            fi
+        done
+        if [ -n "$FOUND_COMPATIBLE" ]; then
+            pass "Model compatible present: $FOUND_COMPATIBLE"
+        else
+            FOUND_INCOMPAT=""
+            for _m in "${INCOMPATIBLE_MODELS[@]}"; do
+                if echo "$OLLAMA_RESP" | grep -q "$_m"; then
+                    FOUND_INCOMPAT="$_m"
+                    break
+                fi
+            done
+            if [ -n "$FOUND_INCOMPAT" ]; then
+                warn "Model $_m present però NO compatible amb tool calling" \
+                    "Substitueix per: ollama pull $RECOMMENDED_MODEL"
+            else
+                warn "Cap model compatible per a Bartolo" \
+                    "Recomanació: ollama pull $RECOMMENDED_MODEL"
+            fi
+            if [ $FIX_MODE -eq 1 ] && command -v ollama >/dev/null; then
+                fix_pull_model
+            else
+                MANUAL_FIXES+=("ollama pull $RECOMMENDED_MODEL")
+            fi
         fi
     fi
 fi
@@ -380,7 +421,9 @@ fi
 
 # 7. Tool (manual)
 header "7. Tool d'OpenWebUI (verificació manual)"
-log "  ${GRAY}A http://localhost:3001:${NC}"
+OWU_PORT=$(docker port "$OPENWEBUI_CONTAINER" 8080 2>/dev/null | head -1 | cut -d: -f2)
+OWU_PORT="${OWU_PORT:-3000}"
+log "  ${GRAY}A http://localhost:${OWU_PORT}:${NC}"
 log "  ${GRAY}1. Settings → Workspace → Tools → Universal Repo Agent${NC}"
 log "  ${GRAY}   Versió esperada: ${BOLD}$EXPECTED_TOOL_VERSION${NC}"
 log "  ${GRAY}2. Settings → Admin → Models → Qwen → Function Calling: ON${NC}"
