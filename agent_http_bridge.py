@@ -230,25 +230,33 @@ UPLOAD_HTML = """<!DOCTYPE html>
 code{background:#c6f6d5;padding:2px 6px;border-radius:4px;word-break:break-all}</style></head><body>
 <h1>Upload ZIP al host</h1><p>Arrossega un .zip o clica per seleccionar.</p>
 <div class="drop" id="drop"><p>Arrossega un .zip aquí, o clica</p>
-<input type="file" id="file" accept=".zip" style="display:none">
+<input type="file" id="file" accept="*" style="display:none">
 <button class="btn" id="pick">Seleccionar fitxer</button></div>
 <div id="result"></div><p style="font-size:12px;color:#666">Workspace: __WORKSPACE__</p>
 <script>
 const drop=document.getElementById('drop'),file=document.getElementById('file'),pick=document.getElementById('pick'),result=document.getElementById('result');
-pick.onclick=e=>{e.stopPropagation();file.click()};drop.onclick=()=>file.click();
-file.onchange=()=>upload(file.files[0]);
-['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('over')}));
-['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('over')}));
-drop.addEventListener('drop',e=>upload(e.dataTransfer.files[0]));
+// Button: stopPropagation+preventDefault evita que el click arribi al div pare
+pick.addEventListener('click',function(e){e.stopPropagation();e.preventDefault();file.click();});
+// Clic al drop zone (fora del botó) → obre diàleg
+drop.addEventListener('click',function(e){if(!pick.contains(e.target))file.click();});
+// Fitxer seleccionat via diàleg
+file.addEventListener('change',function(){if(file.files[0])upload(file.files[0]);});
+// Drag visual
+drop.addEventListener('dragenter',function(e){e.preventDefault();drop.classList.add('over');});
+drop.addEventListener('dragover',function(e){e.preventDefault();drop.classList.add('over');});
+drop.addEventListener('dragleave',function(e){e.preventDefault();drop.classList.remove('over');});
+// Drop: un sol listener que fa preventDefault + neteja classe + puja
+drop.addEventListener('drop',function(e){
+  e.preventDefault();drop.classList.remove('over');
+  if(e.dataTransfer.files[0])upload(e.dataTransfer.files[0]);
+});
 function _copy(btn,txt){
   navigator.clipboard.writeText(txt)
-    .then(()=>{btn.textContent='✓ Copiat!';setTimeout(()=>{btn.textContent=btn.dataset.label},2000)})
-    .catch(()=>{btn.textContent='(selecciona i copia manualment)';});
+    .then(()=>{btn.textContent='✓ Copiat!';setTimeout(()=>{btn.textContent=btn.dataset.label;},2000);})
+    .catch(()=>{btn.textContent='(copia manual)';});
 }
 async function upload(f){
-  if(!f||!f.name.toLowerCase().endsWith('.zip')){
-    result.className='result err';result.textContent='❌ Cal un fitxer .zip';return;
-  }
+  if(!f){result.className='result err';result.textContent='❌ Cap fitxer seleccionat';return;}
   result.className='result';result.textContent='⏳ Pujant '+f.name+' ('+f.size+' bytes)...';
   const fd=new FormData();fd.append('file',f);
   try{
@@ -262,12 +270,13 @@ async function upload(f){
       result.className='result ok';
       result.innerHTML=
         '<b>✅ Fitxer pujat correctament</b>\n'
-        +'Nom: '+name+'\nMida: '+f.size+' bytes\nRuta: '+path+'\n\n'
+        +'Nom: '+name+' | Mida: '+f.size+' bytes\n'
+        +'Ruta al host: '+path+'\n\n'
         +'<button class="btn-sm" id="cp1" data-label="📋 Copia la ruta">📋 Copia la ruta</button>\n\n'
         +'Text per a Bartolo:\n<code>'+bartolo+'</code>\n'
         +'<button class="btn-sm" id="cp2" data-label="📋 Copia text Bartolo">📋 Copia text Bartolo</button>';
-      document.getElementById('cp1').onclick=function(){_copy(this,path)};
-      document.getElementById('cp2').onclick=function(){_copy(this,bartolo)};
+      document.getElementById('cp1').onclick=function(){_copy(this,path);};
+      document.getElementById('cp2').onclick=function(){_copy(this,bartolo);};
     }
   }catch(err){
     result.className='result err';
