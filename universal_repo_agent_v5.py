@@ -730,6 +730,21 @@ def find_env_examples(root: Path) -> List[Path]:
     return found
 
 
+_PLACEHOLDER_KEYWORDS = (
+    "your_", "change_", "xxx", "canvia", "secret_key",
+    "changeme", "change_me", "replace_me", "replace_with",
+    "put_your", "add_your", "insert_your", "your-",
+)
+
+
+def is_placeholder_value(value: str) -> bool:
+    """Retorna True si el valor és buit o sembla un placeholder, no un valor real."""
+    if not value:
+        return True
+    v = value.lower()
+    return any(kw in v for kw in _PLACEHOLDER_KEYWORDS)
+
+
 def parse_env_example(path: Path) -> Dict[str, str]:
     vars_needed: Dict[str, str] = {}
     last_comment = ""
@@ -746,7 +761,8 @@ def parse_env_example(path: Path) -> Dict[str, str]:
             var = var.strip()
             default = default.strip()
             is_secret = any(kw in var.upper() for kw in ["SECRET", "PASSWORD", "TOKEN", "KEY", "API", "DSN", "DATABASE_URL", "DB_", "AUTH", "PRIVATE"])
-            if not default or is_secret:
+            has_real_value = bool(default) and not is_placeholder_value(default)
+            if not has_real_value and (not default or is_secret):
                 vars_needed[var] = last_comment or default or "(requerida)"
         last_comment = ""
     return vars_needed
@@ -795,6 +811,8 @@ def interactive_env_setup(root: Path, env_examples: List[Path], prefilled: Optio
             if var in vars_needed:
                 if var in prefilled:
                     value = prefilled[var]
+                elif default and not is_placeholder_value(default):
+                    value = default
                 else:
                     label = detected_vars.get(var) or vars_needed[var]
                     value = input(f"{var} ({label}) [{default or ''}]: ").strip() or default
@@ -834,6 +852,24 @@ def maybe_promote_single_nested_root(root: Path) -> Path:
     return root
 
 
+def _read_port_from_env_example(path: Path) -> Optional[int]:
+    """Llegeix el valor de PORT del .env.example si existeix i és numèric."""
+    for name in ENV_EXAMPLE_NAMES:
+        example = path / name
+        if not example.exists():
+            continue
+        for line in read_text(example).splitlines():
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            var, _, val = line.partition("=")
+            if var.strip() == "PORT":
+                val = val.strip()
+                if val.isdigit():
+                    return int(val)
+    return None
+
+
 def detect_node_service(path: Path) -> Optional[ServiceInfo]:
     pkg = path / "package.json"
     if not pkg.exists():
@@ -860,7 +896,10 @@ def detect_node_service(path: Path) -> Optional[ServiceInfo]:
     else:
         framework, run_url = "node", None
     pm = "pnpm" if (path / "pnpm-lock.yaml").exists() else "yarn" if (path / "yarn.lock").exists() else "npm"
-    if ports_hint and not run_url:
+    env_port = _read_port_from_env_example(path)
+    if env_port:
+        run_url = f"http://localhost:{env_port}"
+    elif ports_hint and not run_url:
         run_url = f"http://localhost:{ports_hint[0]}"
     confidence = 0.7 + (0.1 if "dev" in scripts else 0) + (0.1 if "start" in scripts else 0)
     return ServiceInfo(name=path.name, path=str(path), service_type="node", framework=framework, entry_hints=list(scripts.keys()), manifests=["package.json"], package_manager=pm, scripts=scripts, ports_hint=sorted(set(ports_hint)), confidence=min(confidence, 0.95), run_url=run_url)
@@ -1225,12 +1264,18 @@ def save_secrets_cache(data: Dict[str, str]) -> None:
         pass
 
 
-def prompt_and_cache_secrets(detected_vars: Dict[str, str], existing_env: str, non_interactive: bool = False) -> Dict[str, str]:
+def prompt_and_cache_secrets(detected_vars: Dict[str, str], existing_env: str, non_interactive: bool = False, example_real_values: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """Per cada secret conegut detectat i que no estigui ja al .env,
-    el busca a la caché i si no hi és el demana a l'usuari i el guarda."""
+    el busca a la caché i si no hi és el demana a l'usuari i el guarda.
+    Si example_real_values conté un valor real (no placeholder) per a la variable, se salta."""
     cache = load_secrets_cache()
     resolved: Dict[str, str] = {}
-    secrets_needed = [v for v in detected_vars if v in KNOWN_SECRET_KEYS and v not in existing_env]
+    secrets_needed = [
+        v for v in detected_vars
+        if v in KNOWN_SECRET_KEYS
+        and v not in existing_env
+        and not (example_real_values and example_real_values.get(v))
+    ]
     if not secrets_needed:
         return resolved
     info(f"Detectats {len(secrets_needed)} secrets requerits: {', '.join(secrets_needed)}")
@@ -1458,15 +1503,21 @@ def detect_third_party_services(root: Path) -> Dict[str, Dict[str, Any]]:
     return detected
 
 
-def prompt_third_party_secrets(detected: Dict[str, Dict[str, Any]], existing_env: str, non_interactive: bool = False) -> Dict[str, str]:
-    """Per cada servei 3a part, avisa i demana claus (amb caché)."""
+def prompt_third_party_secrets(detected: Dict[str, Dict[str, Any]], existing_env: str, non_interactive: bool = False, example_real_values: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Per cada servei 3a part, avisa i demana claus (amb caché).
+    Si example_real_values conté un valor real (no placeholder) per a la variable, se salta."""
     if not detected:
         return {}
     print("\n🔌 SERVEIS 3A PART DETECTATS:")
     cache = load_secrets_cache()
     resolved: Dict[str, str] = {}
     for svc_key, cfg in detected.items():
-        secrets_needed = [s for s in cfg["secrets"] if s not in existing_env and (s not in resolved)]
+        secrets_needed = [
+            s for s in cfg["secrets"]
+            if s not in existing_env
+            and (s not in resolved)
+            and not (example_real_values and example_real_values.get(s))
+        ]
         if not secrets_needed:
             print(f"   · {cfg['label']}: totes les claus ja estan al .env ✅")
             continue
@@ -2765,17 +2816,31 @@ def main() -> int:
         primary_env_file = (Path(emergent["backend"]) / ".env") if emergent else (Path(analysis.root) / ".env")
         existing_env = read_text(primary_env_file) if primary_env_file.exists() else ""
 
-        # 4) Secrets coneguts detectats al codi (sempre, no només Emergent)
+        # 4) Carrega valors reals (no placeholder) del .env.example per no demanar-los per stdin
+        _example_real_values: Dict[str, str] = {}
+        for _ex_path in find_env_examples(Path(analysis.root)):
+            for _line in read_text(_ex_path).splitlines():
+                _stripped = _line.strip()
+                if not _stripped or _stripped.startswith("#") or "=" not in _stripped:
+                    continue
+                _var, _, _val = _stripped.partition("=")
+                _val = _val.strip()
+                if _val and not is_placeholder_value(_val):
+                    _example_real_values[_var.strip()] = _val
+
+        # 4b) Secrets coneguts detectats al codi (sempre, no només Emergent)
         secrets = prompt_and_cache_secrets(
             detected_vars=analysis.env_vars_needed,
             existing_env=existing_env,
             non_interactive=args.non_interactive or args.approve_all,
+            example_real_values=_example_real_values,
         )
         # 5) Secrets de serveis 3a part (Supabase, Firebase, ...)
         tp_secrets = prompt_third_party_secrets(
             detected=third_party,
             existing_env=existing_env + "\n" + "\n".join(secrets.keys()),
             non_interactive=args.non_interactive or args.approve_all,
+            example_real_values=_example_real_values,
         )
         secrets.update(tp_secrets)
         if secrets:
