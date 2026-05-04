@@ -38,6 +38,7 @@ AUTH_TOKEN = os.environ.get("BRIDGE_AUTH_TOKEN", "")
 MAX_RESPONSE_CHARS = 6000
 LAUNCH_TIMEOUT = 1500
 _PORT = 9090
+LOG_DIR = Path(os.environ.get("BRIDGE_LOG_DIR", str(Path.home() / ".universal-agent" / "logs")))
 
 
 def _get_public_url(port: int = 9090) -> str:
@@ -77,49 +78,62 @@ def _gc_old_jobs() -> None:
 def _run_agent_async(job_id: str, args: list, timeout: int) -> None:
     import time as _time
     cmd = [sys.executable, str(AGENT_PATH)] + args
+    # Fix 2: fitxer de log per job, evita acumular output en RAM
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = LOG_DIR / f"{job_id}.log"
+    with _JOBS_LOCK:
+        _JOBS[job_id]["log_path"] = str(log_path)
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, bufsize=1)
         with _JOBS_LOCK:
             _JOBS[job_id]["pid"] = proc.pid
             _JOBS[job_id]["status"] = "running"
+        # Fix 1: sliding window de 500 línies en RAM (elimina les primeres 100 quan s'omple)
         output_lines: list = []
-        for line in proc.stdout:  # type: ignore
-            output_lines.append(line)
-            if len(output_lines) > 2000:
-                output_lines = output_lines[-1000:]
-            with _JOBS_LOCK:
-                _JOBS[job_id]["output"] = "".join(output_lines)
+        with open(log_path, "w", encoding="utf-8") as log_f:
+            for line in proc.stdout:  # type: ignore
+                log_f.write(line)   # Fix 2: escriu a disc en streaming
+                log_f.flush()
+                output_lines.append(line)
+                if len(output_lines) >= 500:
+                    del output_lines[:100]  # Fix 1: descarta les més antigues
         try:
             rc = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
             rc = -1
-            output_lines.append(f"\n[bridge] TIMEOUT {timeout}s\n")
-        # Parse escalation reports BEFORE marking the job done/failed so that
-        # _job_snapshot() always sees error_reports already populated.
+            with open(log_path, "a", encoding="utf-8") as log_f:
+                log_f.write(f"\n[bridge] TIMEOUT {timeout}s\n")
+        # Parse escalation reports des del fitxer (una sola lectura al final)
         error_reports: list = []
         if rc != 0:
             import re as _re, json as _json
-            full_out = "".join(output_lines)
-            for _path_str in _re.findall(r"__ESCALATION_REPORT__=(.+)", full_out):
-                try:
-                    with open(_path_str.strip()) as _f:
-                        error_reports.append(_json.load(_f))
-                except Exception as _err:
-                    sys.stderr.write(f"[bridge] escalation parse error: {_err}\n")
+            try:
+                full_out = log_path.read_text(encoding="utf-8", errors="replace")
+                for _path_str in _re.findall(r"__ESCALATION_REPORT__=(.+)", full_out):
+                    try:
+                        with open(_path_str.strip()) as _f:
+                            error_reports.append(_json.load(_f))
+                    except Exception as _err:
+                        sys.stderr.write(f"[bridge] escalation parse error: {_err}\n")
+            except Exception:
+                pass
         with _JOBS_LOCK:
             _JOBS[job_id]["returncode"] = rc
-            _JOBS[job_id]["output"] = "".join(output_lines)
             _JOBS[job_id]["status"] = "done" if rc == 0 else "failed"
             _JOBS[job_id]["finished_at"] = _time.time()
             _JOBS[job_id]["error_reports"] = error_reports
     except Exception as e:
         with _JOBS_LOCK:
             _JOBS[job_id]["status"] = "failed"
-            _JOBS[job_id]["output"] = f"[bridge] Error: {e}"
             _JOBS[job_id]["returncode"] = -99
             _JOBS[job_id]["finished_at"] = _time.time()
+        try:
+            with open(log_path, "a", encoding="utf-8") as log_f:
+                log_f.write(f"[bridge] Error intern: {e}\n")
+        except Exception:
+            pass
     finally:
         _gc_old_jobs()
 
@@ -128,29 +142,38 @@ def _start_job(args: list, timeout: int = LAUNCH_TIMEOUT) -> str:
     import time as _time
     job_id = _new_job_id()
     with _JOBS_LOCK:
-        _JOBS[job_id] = {"id": job_id, "status": "queued", "args": args, "output": "",
-                         "returncode": None, "pid": None,
+        _JOBS[job_id] = {"id": job_id, "status": "queued", "args": args,
+                         "returncode": None, "pid": None, "log_path": "",
                          "started_at": _time.time(), "finished_at": None,
                          "error_reports": []}
     threading.Thread(target=_run_agent_async, args=(job_id, args, timeout), daemon=True).start()
     return job_id
 
 
-def _job_snapshot(job_id: str, tail_chars: int = MAX_RESPONSE_CHARS) -> Optional[Dict[str, Any]]:
+def _job_snapshot(job_id: str) -> Optional[Dict[str, Any]]:
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
         if not job:
             return None
-        out = job["output"]
-        if len(out) > tail_chars:
-            out = f"... [truncat {len(out) - tail_chars} chars abans] ...\n" + out[-tail_chars:]
+        log_path = job.get("log_path", "")
         reports = job.get("error_reports", [])
-        return {"id": job["id"], "status": job["status"], "returncode": job["returncode"],
+        snap = {"id": job["id"], "status": job["status"], "returncode": job["returncode"],
                 "pid": job["pid"], "started_at": job["started_at"],
-                "finished_at": job["finished_at"], "output": out,
+                "finished_at": job["finished_at"], "log_path": log_path,
                 "ok": job["status"] == "done" and job["returncode"] == 0,
                 "error_reports": reports,
                 "escalation_prompts": [r.get("claude_code_prompt", "") for r in reports]}
+    # Fix 2: llegeix les últimes 50 línies del fitxer (no carrega tot en RAM)
+    out = ""
+    if log_path:
+        try:
+            r = subprocess.run(["tail", "-n", "50", log_path],
+                               capture_output=True, text=True, timeout=5)
+            out = r.stdout
+        except Exception:
+            out = f"[bridge] no s'ha pogut llegir el log: {log_path}"
+    snap["output"] = out
+    return snap
 
 
 def _run_agent(args: list, timeout: int = 60) -> dict:
