@@ -761,7 +761,7 @@ def parse_env_example(path: Path) -> Dict[str, str]:
             var = var.strip()
             default = default.strip()
             is_secret = any(kw in var.upper() for kw in ["SECRET", "PASSWORD", "TOKEN", "KEY", "API", "DSN", "DATABASE_URL", "DB_", "AUTH", "PRIVATE"])
-            has_real_value = bool(default) and not is_placeholder_value(default)
+            has_real_value = bool(default)
             if not has_real_value and (not default or is_secret):
                 vars_needed[var] = last_comment or default or "(requerida)"
         last_comment = ""
@@ -811,7 +811,7 @@ def interactive_env_setup(root: Path, env_examples: List[Path], prefilled: Optio
             if var in vars_needed:
                 if var in prefilled:
                     value = prefilled[var]
-                elif default and not is_placeholder_value(default):
+                elif default:
                     value = default
                 else:
                     label = detected_vars.get(var) or vars_needed[var]
@@ -2825,7 +2825,7 @@ def main() -> int:
                     continue
                 _var, _, _val = _stripped.partition("=")
                 _val = _val.strip()
-                if _val and not is_placeholder_value(_val):
+                if _val:
                     _example_real_values[_var.strip()] = _val
 
         # 4b) Secrets coneguts detectats al codi (sempre, no només Emergent)
