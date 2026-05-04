@@ -85,11 +85,16 @@ REQUEREIX que el model emeti el camp `tool_calls` en la resposta JSON d'Ollama.
 Alguns models emeten la crida com a **text al camp `content`** (fals positiu visual:
 sembla que funciona però la tool no s'executa).
 
-| Model | Tool calling | Notes |
-|---|---|---|
-| `qwen2.5:14b` | ✅ | Emet `tool_calls` correctament. Model actiu a Bartolo. |
-| `qwen2.5-coder:14b` | ❌ | Emet la crida com a text al `content`. No funciona. |
-| `mistral-nemo:12b` | ❌ | Mateix problema que coder:14b. |
+| Model | VRAM | Tool calling | Notes |
+|---|---|---|---|
+| `qwen2.5:14b` | ~8.5 GB | ✅ | Emet `tool_calls` correctament. **Model actiu a Bartolo.** Verificat 2026-05-04 amb RTX 3080 (9.4 GB lliures → cap en VRAM sense offloading). |
+| `qwen2.5:7b` | ~4.4 GB | ✅ | Bo per a RTX 3080 si hi ha poca VRAM lliure. |
+| `llama3.1:8b` | ~4.7 GB | ✅ | Excel·lent amb tools. |
+| `llama3:latest` | 4.7 GB | ❌ | No suporta tool calling. |
+| `qwen2.5-coder:14b` | ~8.5 GB | ❌ | Emet la crida com a text al `content`. No funciona. |
+| `qwen2.5-coder:7b` | ~4.4 GB | ❌ | Mateix problema que coder:14b. |
+| `mistral-nemo:12b` | ~7 GB | ❌ | Mateix problema que coder:14b. |
+| `qwen3:8b` | ~5 GB | ⚠️ | No verificat amb tools. |
 
 ### Snippet de validació per a models nous
 
@@ -169,11 +174,11 @@ El "debugger" actual no té memòria entre intents ni context del repo. Vegeu el
 
 ## Millores futures descobertes
 
-### systemd user service per al bridge
-El fitxer `/home/usuari/.config/systemd/user/agent-bridge.service` ja existeix (va córrer
-el 2026-04-23) però no s'usa — el bridge s'arrenca manualment. Podria activar-se amb
-`systemctl --user enable --now agent-bridge` per tenir arrencada automàtica i restart.
-Risc: cap. Benefici: supervivència als reboots.
+### ✅ [RESOLT 2026-05-04] systemd user service per al bridge
+`agent-bridge.service` activat i enabled. El bridge sobreviu als reboots.
+Afegits `StandardOutput=journal` i `StandardError=journal` per tenir logs centralitzats.
+Script `start-bartolo.sh` creat per arrancar Ollama + bridge + open-webui i executar bartolo-doctor.
+Logs: `journalctl --user -u agent-bridge -f`
 
 ### bench.sh no passa --non-interactive
 El mode `analyze` del bench falla repos que demanen secrets o deps del sistema

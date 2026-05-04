@@ -234,53 +234,40 @@ code{background:#c6f6d5;padding:2px 6px;border-radius:4px;word-break:break-all}<
 <button class="btn" id="pick">Seleccionar fitxer</button></div>
 <div id="result"></div><p style="font-size:12px;color:#666">Workspace: __WORKSPACE__</p>
 <script>
-const drop=document.getElementById('drop'),file=document.getElementById('file'),pick=document.getElementById('pick'),result=document.getElementById('result');
-// Button: stopPropagation+preventDefault evita que el click arribi al div pare
+var drop=document.getElementById('drop'),file=document.getElementById('file'),pick=document.getElementById('pick'),result=document.getElementById('result');
 pick.addEventListener('click',function(e){e.stopPropagation();e.preventDefault();file.click();});
-// Clic al drop zone (fora del botó) → obre diàleg
 drop.addEventListener('click',function(e){if(!pick.contains(e.target))file.click();});
-// Fitxer seleccionat via diàleg
 file.addEventListener('change',function(){if(file.files[0])upload(file.files[0]);});
-// Drag visual
 drop.addEventListener('dragenter',function(e){e.preventDefault();drop.classList.add('over');});
 drop.addEventListener('dragover',function(e){e.preventDefault();drop.classList.add('over');});
 drop.addEventListener('dragleave',function(e){e.preventDefault();drop.classList.remove('over');});
-// Drop: un sol listener que fa preventDefault + neteja classe + puja
-drop.addEventListener('drop',function(e){
-  e.preventDefault();drop.classList.remove('over');
-  if(e.dataTransfer.files[0])upload(e.dataTransfer.files[0]);
-});
+drop.addEventListener('drop',function(e){e.preventDefault();drop.classList.remove('over');if(e.dataTransfer.files[0])upload(e.dataTransfer.files[0]);});
 function _copy(btn,txt){
-  navigator.clipboard.writeText(txt)
-    .then(()=>{btn.textContent='✓ Copiat!';setTimeout(()=>{btn.textContent=btn.dataset.label;},2000);})
-    .catch(()=>{btn.textContent='(copia manual)';});
+  navigator.clipboard.writeText(txt).then(function(){btn.textContent='Copiat!';setTimeout(function(){btn.textContent=btn.dataset.label;},2000);}).catch(function(){btn.textContent='(copia manual)';});
 }
 async function upload(f){
-  if(!f){result.className='result err';result.textContent='❌ Cap fitxer seleccionat';return;}
-  result.className='result';result.textContent='⏳ Pujant '+f.name+' ('+f.size+' bytes)...';
-  const fd=new FormData();fd.append('file',f);
+  if(!f){result.className='result err';result.textContent='Cap fitxer seleccionat';return;}
+  result.className='result';result.textContent='Pujant '+f.name+' ('+f.size+' bytes)...';
+  var fd=new FormData();fd.append('file',f);
   try{
-    const r=await fetch('/upload',{method:'POST',body:fd});
-    const d=await r.json();
+    var r=await fetch('/upload',{method:'POST',body:fd});
+    var d=await r.json();
     if(d.error){
       result.className='result err';
-      result.textContent='❌ Error del servidor: '+d.error;
-    } else {
-      const path=d.path,name=path.split('/').pop(),bartolo='munta el repo '+path;
+      result.textContent='Error: '+d.error;
+    }else{
+      var path=d.path,name=path.split('/').pop(),bartolo='munta el repo '+path;
       result.className='result ok';
-      result.innerHTML=
-        '<b>✅ Fitxer pujat correctament</b>\n'
-        +'Nom: '+name+' | Mida: '+f.size+' bytes\n'
-        +'Ruta al host: '+path+'\n\n'
-        +'<button class="btn-sm" id="cp1" data-label="📋 Copia la ruta">📋 Copia la ruta</button>\n\n'
-        +'Text per a Bartolo:\n<code>'+bartolo+'</code>\n'
-        +'<button class="btn-sm" id="cp2" data-label="📋 Copia text Bartolo">📋 Copia text Bartolo</button>';
+      result.innerHTML='<b>Fitxer pujat!</b>\nNom: '+name+' | Mida: '+f.size+' bytes\nRuta al host: '+path+'\n\n'
+        +'<button class="btn-sm" id="cp1" data-label="Copia la ruta">Copia la ruta</button>\n\n'
+        +'Text per a Bartolo (enganxa al xat):\n<code>'+bartolo+'</code>\n'
+        +'<button class="btn-sm" id="cp2" data-label="Copia text Bartolo">Copia text Bartolo</button>';
       document.getElementById('cp1').onclick=function(){_copy(this,path);};
       document.getElementById('cp2').onclick=function(){_copy(this,bartolo);};
     }
   }catch(err){
     result.className='result err';
-    result.textContent='❌ Error de xarxa: '+(err.message||String(err));
+    result.textContent='Error de xarxa: '+(err.message||String(err));
     console.error('[upload]',err);
   }
 }
