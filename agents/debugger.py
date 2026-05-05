@@ -65,7 +65,6 @@ class RepairKB:
             return {}
 
     def _dump(self, data: Dict[str, Any]) -> None:
-        import tempfile
         content = json.dumps(data, indent=2, ensure_ascii=False)
         tmp = self._json_path.parent / f".repair_kb_tmp_{os.getpid()}"
         tmp.write_text(content, encoding="utf-8")
@@ -471,7 +470,7 @@ class IntelligentDebugger:
                                   "stderr_tail": _tail(kb_result.stderr, 5),
                                   "result": kb_result, "success": kb_success})
             if kb_success:
-                self.kb.save(stack, "kb_hit", kb_entry.get("keywords", []), kb_cmd, "kb")
+                self.kb.save(stack, kb_entry.get("error_type", "kb_hit"), kb_entry.get("keywords", []), kb_cmd, "kb")
                 return RepairResult(repaired=True, source="kb", fix_command=kb_cmd,
                                     diagnosis=None, execution_results=all_results,
                                     repair_attempts=all_attempts)
@@ -497,9 +496,9 @@ class IntelligentDebugger:
         anthropic_cmd = self._repair_with_anthropic(step, ollama_attempts, stack, kb_md)
         if anthropic_cmd:
             _info(f"Anthropic suggereix: {anthropic_cmd}")
-            ant_result, ant_success = self._run_repair_cmd(anthropic_cmd, step, 99)
+            ant_result, ant_success = self._run_repair_cmd(anthropic_cmd, step, len(all_attempts) + 1)
             all_results.append(ant_result)
-            all_attempts.append({"attempt": 99, "command": anthropic_cmd,
+            all_attempts.append({"attempt": len(all_attempts) + 1, "command": anthropic_cmd,
                                   "returncode": ant_result.returncode,
                                   "stderr_tail": _tail(ant_result.stderr, 5),
                                   "result": ant_result, "success": ant_success})

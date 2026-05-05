@@ -85,6 +85,36 @@ def test_result_to_step_error_repaired_false():
         assert isinstance(repair_result, RepairResult)
         assert repair_result.repaired is False
 
+def test_to_step_error_fields():
+    import sys, os as _os
+    sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    from agents.debugger import RepairResult, Diagnosis
+
+    class SE_Step:
+        id = "test-step"; title = "Test Step"
+        command = "npm install"; cwd = "/tmp/repo"
+
+    class FakeExecResult:
+        returncode = 1; stdout = "some output"; stderr = "some error"
+        step_id = "test-step"; repaired = False
+        started_at = 0.0; finished_at = 0.0
+
+    diag = Diagnosis(error_type="missing_dependency", description="missing npm",
+                     can_fix_automatically=False)
+    rr = RepairResult(
+        repaired=False, source="none", fix_command=None,
+        diagnosis=diag,
+        execution_results=[FakeExecResult()],
+        repair_attempts=[],
+    )
+    step_error = rr.to_step_error(SE_Step())
+    assert step_error.step_id == "test-step"
+    assert step_error.step_title == "Test Step"
+    assert step_error.repaired is False
+    assert step_error.returncode == 1
+    assert "[missing_dependency]" in step_error.diagnosis
+
+
 passes = 0
 for fn_name, fn in list(globals().items()):
     if fn_name.startswith("test_"):
