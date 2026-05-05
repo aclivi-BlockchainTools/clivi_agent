@@ -431,3 +431,120 @@ class IntelligentDebugger:
         except Exception as e:
             _warn(f"Anthropic API fallback ha fallat: {e}")
         return None
+
+    def _kb_scan(self, stack: str, stderr_text: str) -> Optional[Dict[str, Any]]:
+        """Scan KB for an entry whose keywords are a subset of those in stderr_text."""
+        data = self.kb._load()
+        stderr_kws = set(self.kb._extract_keywords(stderr_text))
+        best: Optional[Dict[str, Any]] = None
+        best_score = 0
+        for entry in data.values():
+            if entry.get("stack") != stack:
+                continue
+            entry_kws = set(entry.get("keywords", []))
+            if entry_kws and entry_kws.issubset(stderr_kws):
+                score = len(entry_kws)
+                if score > best_score:
+                    best_score = score
+                    best = entry
+        return best
+
+    def repair(self, step: Any, initial_result: Any, approve_all: bool = True) -> RepairResult:
+        """
+        Main entry point. Orchestrates: KB lookup → Ollama multi-turn → Anthropic fallback.
+        Returns RepairResult with all execution details.
+        """
+        stack = self._stack()
+        kb_md = self.kb.markdown_for_stack(stack)
+        all_results: List[Any] = [initial_result]
+        all_attempts: List[Dict[str, Any]] = []
+
+        # 1. KB lookup — if known fix exists, try it first
+        kb_entry = self._kb_scan(stack, initial_result.stderr)
+        if kb_entry:
+            kb_cmd = kb_entry["fix_command"]
+            _info(f"KB hit: {kb_cmd}")
+            kb_result, kb_success = self._run_repair_cmd(kb_cmd, step, 0)
+            all_results.append(kb_result)
+            all_attempts.append({"attempt": 0, "command": kb_cmd,
+                                  "returncode": kb_result.returncode,
+                                  "stderr_tail": _tail(kb_result.stderr, 5),
+                                  "result": kb_result, "success": kb_success})
+            if kb_success:
+                self.kb.save(stack, "kb_hit", kb_entry.get("keywords", []), kb_cmd, "kb")
+                return RepairResult(repaired=True, source="kb", fix_command=kb_cmd,
+                                    diagnosis=None, execution_results=all_results,
+                                    repair_attempts=all_attempts)
+
+        # 2. Diagnose with repo context
+        diagnosis = self._diagnose(step, initial_result)
+        _info(f"Diagnosi: [{diagnosis.error_type}] {diagnosis.description}")
+
+        # 3. Ollama multi-turn loop
+        ollama_attempts = self._repair_loop_ollama(step, initial_result, stack, kb_md)
+        all_attempts.extend(ollama_attempts)
+        all_results.extend(a["result"] for a in ollama_attempts if a.get("result") is not None)
+
+        successful = next((a for a in ollama_attempts if a.get("success")), None)
+        if successful:
+            self.kb.save(stack, diagnosis.error_type, diagnosis.keywords,
+                         successful["command"], "ollama")
+            return RepairResult(repaired=True, source="ollama", fix_command=successful["command"],
+                                diagnosis=diagnosis, execution_results=all_results,
+                                repair_attempts=all_attempts)
+
+        # 4. Anthropic API fallback
+        anthropic_cmd = self._repair_with_anthropic(step, ollama_attempts, stack, kb_md)
+        if anthropic_cmd:
+            _info(f"Anthropic suggereix: {anthropic_cmd}")
+            ant_result, ant_success = self._run_repair_cmd(anthropic_cmd, step, 99)
+            all_results.append(ant_result)
+            all_attempts.append({"attempt": 99, "command": anthropic_cmd,
+                                  "returncode": ant_result.returncode,
+                                  "stderr_tail": _tail(ant_result.stderr, 5),
+                                  "result": ant_result, "success": ant_success})
+            if ant_success:
+                self.kb.save(stack, diagnosis.error_type, diagnosis.keywords,
+                             anthropic_cmd, "anthropic")
+                return RepairResult(repaired=True, source="anthropic", fix_command=anthropic_cmd,
+                                    diagnosis=diagnosis, execution_results=all_results,
+                                    repair_attempts=all_attempts)
+
+        # 5. All failed — escalate via ErrorReporter
+        self._escalate(step, diagnosis, all_attempts, initial_result)
+
+        return RepairResult(repaired=False, source="none", fix_command=None,
+                            diagnosis=diagnosis, execution_results=all_results,
+                            repair_attempts=all_attempts)
+
+    def _escalate(self, step: Any, diagnosis: Diagnosis,
+                  attempts: List[Dict[str, Any]], initial_result: Any) -> None:
+        try:
+            import sys as _sys
+            _sys.path.insert(0, str(Path(__file__).parent.parent))
+            from agents.error_reporter import ErrorReporter
+            stack = self._stack()
+            reporter = ErrorReporter(workspace=self.workspace)
+            step_error_proxy = type("SE", (), {
+                "step_title": step.title,
+                "command": step.command,
+                "cwd": step.cwd,
+                "returncode": initial_result.returncode,
+                "stderr_tail": _tail(initial_result.stderr, 8),
+                "stdout_tail": _tail(initial_result.stdout, 8),
+                "diagnosis": f"[{diagnosis.error_type}] {diagnosis.description}",
+                "repaired": False,
+            })()
+            clean_attempts = [{k: v for k, v in a.items() if k != "result"} for a in attempts]
+            report = reporter.generate(
+                step_error=step_error_proxy,
+                repair_attempts=clean_attempts,
+                repo_root=Path(self.analysis.root),
+                repo_name=self.analysis.repo_name,
+                stack_name=stack,
+                missing_deps=list(getattr(self.analysis, "missing_system_deps", [])),
+                full_stderr=_tail(initial_result.stderr, 20),
+            )
+            reporter.save_and_print(report)
+        except Exception as e:
+            _warn(f"ErrorReporter: {e}")
