@@ -165,3 +165,99 @@ def _read_api_key() -> Optional[str]:
 def _make_anthropic_client(api_key: str) -> Any:
     import anthropic
     return anthropic.Anthropic(api_key=api_key)
+
+
+class IntelligentDebugger:
+    """
+    Orquestrador de diagnosi i reparació per a passos fallits.
+    Manté conversa multi-torn, consulta KB local i fa fallback a Anthropic.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        analysis: Any,
+        workspace: Any,
+        ollama_fn: Optional[Any] = None,
+        kb_dir: Optional[str] = None,
+        max_repair_attempts: int = 2,
+    ):
+        self.model = model
+        self.analysis = analysis
+        self.workspace = Path(workspace)
+        self.max_repair_attempts = max_repair_attempts
+        self.kb = RepairKB(kb_dir=kb_dir)
+        self._ollama_fn = ollama_fn  # injectable for tests; lazy import if None
+
+    def _ollama(self, messages: List[Dict[str, Any]], schema: Optional[Dict] = None, timeout: int = 180) -> Any:
+        if self._ollama_fn:
+            return self._ollama_fn(self.model, messages, schema=schema, timeout=timeout)
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent.parent))
+        from universal_repo_agent_v5 import ollama_chat_json
+        return ollama_chat_json(self.model, messages, schema=schema, timeout=timeout)
+
+    def _stack(self) -> str:
+        services = getattr(self.analysis, "services", [])
+        if services:
+            return getattr(services[0], "service_type", "unknown")
+        return "unknown"
+
+    def _build_system_prompt(self, stack: str, kb_md: str) -> str:
+        root = getattr(self.analysis, "root", "")
+        manifests = getattr(self.analysis, "top_level_manifests", [])
+        manifests_str = ", ".join(manifests[:5]) if manifests else "cap"
+        missing = getattr(self.analysis, "missing_system_deps", [])
+        missing_str = (f"\nDependències del sistema que falten: {', '.join(missing)}"
+                       if missing else "")
+        kb_section = f"\nKB de fixes coneguts:\n{kb_md}" if kb_md.strip() else ""
+        return (
+            f"Ets un expert en desplegar repositoris a Linux.\n"
+            f"Stack detectat: {stack}\n"
+            f"Arrel del repo: {root}\n"
+            f"Fitxers principals: {manifests_str}{missing_str}{kb_section}\n"
+            f"Regles: sense sudo, sense comandes destructives, cwd fix, només Linux."
+        )
+
+    def _diagnose(self, step: Any, result: Any) -> Diagnosis:
+        schema = {
+            "type": "object",
+            "properties": {
+                "diagnosis": {"type": "string"},
+                "likely_cause": {"type": "string", "enum": [
+                    "missing_dependency", "wrong_config", "missing_env_var",
+                    "network_error", "permission_error", "broken_repo",
+                    "wrong_version", "port_conflict", "other",
+                ]},
+                "can_be_fixed_automatically": {"type": "boolean"},
+            },
+            "required": ["diagnosis", "likely_cause", "can_be_fixed_automatically"],
+        }
+        stack = self._stack()
+        kb_md = self.kb.markdown_for_stack(stack)
+        system_prompt = self._build_system_prompt(stack, kb_md)
+        try:
+            data = self._ollama(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps({
+                        "command": result.command,
+                        "cwd": result.cwd,
+                        "returncode": result.returncode,
+                        "stdout": _tail(result.stdout, 20),
+                        "stderr": _tail(result.stderr, 20),
+                    }, ensure_ascii=False)},
+                ],
+                schema=schema,
+                timeout=60,
+            )
+            kws_text = f"{result.stderr} {result.stdout}"
+            return Diagnosis(
+                error_type=data.get("likely_cause", "other"),
+                description=data.get("diagnosis", "Error desconegut"),
+                can_fix_automatically=data.get("can_be_fixed_automatically", False),
+                keywords=RepairKB.__new__(RepairKB)._extract_keywords(kws_text),
+            )
+        except Exception:
+            return Diagnosis(error_type="other", description="No s'ha pogut diagnosticar.",
+                             can_fix_automatically=False)
