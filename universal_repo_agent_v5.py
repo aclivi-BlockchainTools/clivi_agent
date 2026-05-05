@@ -2105,11 +2105,20 @@ def build_deterministic_plan(analysis: RepoAnalysis) -> ExecutionPlan:
             steps.append(step)
     root_docker = detect_docker_service(root)
     if root_docker and file_exists_any(root, ["docker-compose.yml", "docker-compose.yaml", "compose.yml"]):
-        cmd = choose_docker_cmd(root_docker)
-        if cmd:
-            command, verify_port_num, verify_url = choose_service_verify(cmd, root_docker)
-            steps.append(CommandStep(id="docker-up", title="Inicia el stack amb docker compose", cwd=str(root), command=command, expected_outcome="Tots els serveis arrenquen correctament", category="run", verify_port=verify_port_num, verify_url=verify_url))
-            return ExecutionPlan(summary="Docker Compose detectat al root del repositori.", steps=steps, notes=notes)
+        # No afegir docker-up si un setup script (start.sh, run.sh...) ja crida docker compose
+        # internament: evita 2 builds docker simultanis que causen OOM.
+        script_runs_docker = False
+        for s in analysis.setup_scripts_found:
+            content = read_text(root / s, max_chars=4000)
+            if "docker compose up" in content or "docker-compose up" in content:
+                script_runs_docker = True
+                break
+        if not script_runs_docker:
+            cmd = choose_docker_cmd(root_docker)
+            if cmd:
+                command, verify_port_num, verify_url = choose_service_verify(cmd, root_docker)
+                steps.append(CommandStep(id="docker-up", title="Inicia el stack amb docker compose", cwd=str(root), command=command, expected_outcome="Tots els serveis arrenquen correctament", category="run", verify_port=verify_port_num, verify_url=verify_url))
+        return ExecutionPlan(summary="Docker Compose detectat al root del repositori.", steps=steps, notes=notes)
     for svc in analysis.services:
         svc_path = Path(svc.path)
         st = svc.service_type
