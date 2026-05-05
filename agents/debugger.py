@@ -368,3 +368,66 @@ class IntelligentDebugger:
             }, ensure_ascii=False)})
 
         return attempts
+
+    def _repair_with_anthropic(
+        self,
+        step: Any,
+        prior_attempts: List[Dict[str, Any]],
+        stack: str,
+        kb_md: str,
+    ) -> Optional[str]:
+        """
+        Fallback: asks Claude (Anthropic API) for a repair command after Ollama exhaustion.
+        Returns the command string, or None if unavailable or API call fails.
+        """
+        api_key = _read_api_key()
+        if not api_key:
+            _warn("Anthropic API key no configurada — saltant fallback.")
+            return None
+        try:
+            client = _make_anthropic_client(api_key)
+        except ImportError:
+            _warn("anthropic no instal·lat (pip install anthropic) — saltant fallback.")
+            return None
+
+        system_prompt = self._build_system_prompt(stack, kb_md)
+
+        messages: List[Dict[str, Any]] = []
+        for a in prior_attempts:
+            messages.append({"role": "user", "content": json.dumps({
+                "attempt": a["attempt"],
+                "tried_command": a["command"],
+                "returncode": a["returncode"],
+                "stderr": a["stderr_tail"],
+            }, ensure_ascii=False)})
+            messages.append({"role": "assistant",
+                             "content": f"(intent {a['attempt']} ha fallat, cal una altra solució)"})
+
+        messages.append({"role": "user", "content": (
+            f"Ollama ha esgotat {len(prior_attempts)} intents sense èxit per al pas: "
+            f"'{step.title}' (comanda original: {step.command}). "
+            f"Necessito UNA comanda shell alternativa per solucionar-ho. "
+            f"Respon NOMÉS en JSON: {{\"command\": \"...\", \"reason\": \"...\"}}"
+        )})
+
+        try:
+            response = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=256,
+                system=[{
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                messages=messages,
+            )
+            raw = response.content[0].text.strip()
+            match = re.search(r'\{[^}]+\}', raw, re.DOTALL)
+            if match:
+                data = json.loads(match.group())
+                command = data.get("command", "").strip().splitlines()[0]
+                if command:
+                    return command
+        except Exception as e:
+            _warn(f"Anthropic API fallback ha fallat: {e}")
+        return None
