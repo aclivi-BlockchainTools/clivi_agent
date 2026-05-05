@@ -1,7 +1,7 @@
 """
 title: Universal Repo Agent
 author: usuari
-version: 2.4
+version: 2.5
 description: Pont a l'agent universal local. Suporta async, exec_shell amb confirmació i upload de ZIPs.
 """
 import json
@@ -100,6 +100,20 @@ class Tools:
                 f"Iniciada: {r.get('started_at')}\n"
                 f"Acabada: {r.get('finished_at')}\n"
                 f"--- sortida (final) ---\n{out}")
+
+    def segueix_progres_job(self, job_id: str) -> str:
+        """
+        Mostra les últimes línies de progrés d'un job en execució.
+        Crida-la repetidament per veure com avança l'agent pas a pas.
+        :param job_id: identificador retornat per executa_repo_async.
+        """
+        r = self._get(f"/job/{job_id}/stream", timeout=10)
+        if "error" in r:
+            return f"Error: {r['error']}"
+        status = r.get("status", "?")
+        lines = r.get("lines", "").strip()
+        emoji = {"running": "⏳", "done": "✅", "failed": "❌", "queued": "🕐"}.get(status, "❓")
+        return f"{emoji} [{status}]\n{lines}" if lines else f"{emoji} [{status}] (sense sortida encara)"
 
     def llista_jobs(self) -> str:
         """Llista totes les feines (en execució i acabades) registrades al bridge."""

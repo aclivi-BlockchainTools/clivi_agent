@@ -5,8 +5,9 @@ HTTP Bridge per exposar l'agent al host a OpenWebUI dins Docker.
 Endpoints:
     POST /run           { "input": "<url|path>", ... } (síncron, fins a 25 min)
     POST /run/async     { "input": ... }  →  retorna {"job_id": "..."} immediat
-    GET  /job/<id>      → estat i sortida acumulada del job
-    GET  /jobs          → llista de jobs (en execució i acabats)
+    GET  /job/<id>           → estat i sortida acumulada del job
+    GET  /job/<id>/stream    → últimes N línies del log (polling; ?n=50)
+    GET  /jobs               → llista de jobs (en execució i acabats)
     POST /analyze       { "input": ... }
     POST /stop          { "repo": "nom|all" }
     POST /refresh       { "repo": "nom" }
@@ -173,6 +174,26 @@ def _job_snapshot(job_id: str) -> Optional[Dict[str, Any]]:
         except Exception:
             out = f"[bridge] no s'ha pogut llegir el log: {log_path}"
     snap["output"] = out
+    return snap
+
+
+def _job_stream(job_id: str, n: int = 50) -> Optional[Dict[str, Any]]:
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id)
+        if not job:
+            return None
+        log_path = job.get("log_path", "")
+        snap = {"id": job["id"], "status": job["status"], "started_at": job["started_at"]}
+    out = ""
+    if log_path:
+        try:
+            r = subprocess.run(["tail", "-n", str(n), log_path],
+                               capture_output=True, text=True, timeout=5)
+            out = r.stdout
+        except Exception:
+            out = ""
+    snap["lines"] = out
+    snap["n"] = n
     return snap
 
 
@@ -373,11 +394,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"error": "missing 'repo'"}); return
             self._json(200, _run_agent(["--workspace", str(WORKSPACE), "--logs", repo], timeout=30))
         elif parsed.path.startswith("/job/"):
-            jid = parsed.path.split("/job/", 1)[1].strip("/")
-            snap = _job_snapshot(jid)
-            if not snap:
-                self._json(404, {"error": f"job {jid} no trobat"}); return
-            self._json(200, snap)
+            rest = parsed.path.split("/job/", 1)[1].strip("/")
+            if rest.endswith("/stream"):
+                jid = rest[:-len("/stream")].strip("/")
+                n = int(parse_qs(parsed.query).get("n", ["50"])[0])
+                data = _job_stream(jid, n)
+                if not data:
+                    self._json(404, {"error": f"job {jid} no trobat"}); return
+                self._json(200, data)
+            else:
+                snap = _job_snapshot(rest)
+                if not snap:
+                    self._json(404, {"error": f"job {rest} no trobat"}); return
+                self._json(200, snap)
         elif parsed.path == "/jobs":
             with _JOBS_LOCK:
                 summary = [{"id": j["id"], "status": j["status"],
