@@ -154,6 +154,11 @@ def _read_api_key() -> Optional[str]:
     key = os.environ.get("ANTHROPIC_API_KEY")
     if key:
         return key
+    key_file = _SECRETS_PATH.parent / "anthropic_api_key"
+    if key_file.exists():
+        val = key_file.read_text(encoding="utf-8").strip()
+        if val:
+            return val
     try:
         secrets = json.loads(_SECRETS_PATH.read_text(encoding="utf-8"))
         return secrets.get("anthropic_api_key")
