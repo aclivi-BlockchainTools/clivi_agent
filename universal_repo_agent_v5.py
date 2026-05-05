@@ -555,6 +555,10 @@ def acquire_input(input_value: str, workspace: Path, github_token: str = "", git
         repo_name = Path(parsed.path).stem or "repo"
         target = workspace / slugify(repo_name)
         if target.exists():
+            # Atura serveis en background (docker compose, uvicorn, yarn...) ABANS d'esborrar el directori.
+            # Sense això, setsid+nohup fa que els builds anteriors continuïn corrents simultàniament
+            # amb els nous → OOM → reinici de màquina.
+            stop_services(workspace, repo_name=target.name)
             shutil.rmtree(target)
         clone_url = inject_git_token(input_value, github_token=github_token, gitlab_token=gitlab_token, bitbucket_token=bitbucket_token)
         info(f"Clonant {input_value} → {target}")
