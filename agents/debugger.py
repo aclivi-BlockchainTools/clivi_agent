@@ -42,7 +42,7 @@ class RepairKB:
         self._json_path = self._dir / "repair_kb.json"
 
     def _fingerprint(self, stack: str, error_type: str, stderr_text: str) -> str:
-        kws = "+".join(self._extract_keywords(stderr_text))
+        kws = "+".join(sorted(self._extract_keywords(stderr_text)))
         raw = f"{stack}|{error_type}|{kws}"
         return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
@@ -50,7 +50,7 @@ class RepairKB:
         tokens = re.findall(r"[A-Za-z][A-Za-z0-9_]*", text)
         seen: Dict[str, int] = {}
         for t in tokens:
-            if t.lower() in _STOP_WORDS or len(t) < 4 or t.isdigit():
+            if t.lower() in _STOP_WORDS or len(t) < 4:
                 continue
             seen[t] = seen.get(t, 0) + 1
         sorted_tokens = sorted(seen, key=lambda k: -seen[k])
@@ -65,7 +65,11 @@ class RepairKB:
             return {}
 
     def _dump(self, data: Dict[str, Any]) -> None:
-        self._json_path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+        import tempfile
+        content = json.dumps(data, indent=2, ensure_ascii=False)
+        tmp = self._json_path.parent / f".repair_kb_tmp_{os.getpid()}"
+        tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, self._json_path)
 
     def lookup(self, stack: str, error_type: str, stderr_text: str) -> Optional[Dict[str, Any]]:
         fp = self._fingerprint(stack, error_type, stderr_text)
@@ -75,14 +79,15 @@ class RepairKB:
         fp = self._fingerprint(stack, error_type, " ".join(keywords))
         data = self._load()
         entry = data.get(fp, {})
+        new_count = entry.get("success_count", 0) + 1
         data[fp] = {
             "stack": stack,
             "error_type": error_type,
             "keywords": keywords,
-            "fix_command": fix_command,
-            "success_count": entry.get("success_count", 0) + 1,
+            "fix_command": fix_command if new_count == 1 else entry.get("fix_command", fix_command),
+            "success_count": new_count,
             "last_seen": datetime.now().isoformat(timespec="seconds"),
-            "source": source,
+            "source": source if new_count == 1 else entry.get("source", source),
         }
         self._dump(data)
         self._update_markdown(stack, data)
@@ -91,7 +96,7 @@ class RepairKB:
         md_path = self._dir / f"repair_kb_{stack}.md"
         if not md_path.exists():
             return ""
-        return md_path.read_text()
+        return md_path.read_text(encoding="utf-8")
 
     def _update_markdown(self, stack: str, data: Dict[str, Any]) -> None:
         entries = [v for v in data.values() if v.get("stack") == stack]
@@ -102,4 +107,4 @@ class RepairKB:
             lines.append(f"## {e['error_type']} / {' + '.join(e.get('keywords', []))}")
             lines.append(f"Fix: `{e['fix_command']}`")
             lines.append(f"Vist: {e['success_count']} vegades · Font: {e['source']}\n")
-        (self._dir / f"repair_kb_{stack}.md").write_text("\n".join(lines))
+        (self._dir / f"repair_kb_{stack}.md").write_text("\n".join(lines), encoding="utf-8")
