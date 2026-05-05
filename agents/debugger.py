@@ -261,3 +261,110 @@ class IntelligentDebugger:
         except Exception:
             return Diagnosis(error_type="other", description="No s'ha pogut diagnosticar.",
                              can_fix_automatically=False)
+
+    def _run_repair_cmd(self, command: str, step: Any, attempt: int) -> tuple:
+        """Validates and executes a repair command. Returns (ExecutionResult, success: bool)."""
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent.parent))
+        from universal_repo_agent_v5 import (
+            run_shell, validate_command, maybe_background_command,
+            register_service, verify_step as _verify_step,
+            _extract_agent_pid, ExecutionResult,
+        )
+        repo_root = Path(self.analysis.root)
+        try:
+            validate_command(command, repo_root=repo_root)
+        except Exception as e:
+            _warn(f"Repair command rebutjat pel validator: {e}")
+            now = time.time()
+            return ExecutionResult(
+                step_id=step.id, command=command, cwd=step.cwd,
+                returncode=-1, stdout="", stderr=f"Rejected by validator: {e}",
+                started_at=now, finished_at=now,
+            ), False
+
+        fix_cmd = command
+        is_bg = False
+        if step.category == "run":
+            fix_cmd, is_bg = maybe_background_command(command)
+
+        result = run_shell(fix_cmd, cwd=Path(step.cwd), repo_root=repo_root)
+        result.step_id = step.id
+        result.repaired = True
+        success = result.returncode == 0
+
+        if success and is_bg:
+            pid = _extract_agent_pid(result.stdout)
+            register_service(
+                workspace=self.workspace,
+                repo_name=self.analysis.repo_name,
+                step_id=step.id,
+                cwd=step.cwd,
+                command=command,
+                pid=pid,
+                log_file=str(Path(step.cwd) / ".agent_last_run.log"),
+            )
+        if success and step.category == "run":
+            if not _verify_step(step):
+                result.returncode = 1
+                result.stderr += "\nVerification failed after repair.\n"
+                success = False
+        return result, success
+
+    def _repair_loop_ollama(
+        self, step: Any, initial_result: Any, stack: str, kb_md: str
+    ) -> List[Dict[str, Any]]:
+        """Multi-turn repair loop with Ollama. Returns list of attempt dicts."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["command", "reason"],
+        }
+        system_prompt = self._build_system_prompt(stack, kb_md)
+        history: List[Dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps({
+                "failed_command": step.command,
+                "cwd": step.cwd,
+                "returncode": initial_result.returncode,
+                "stderr": _tail(initial_result.stderr, 15),
+                "stdout": _tail(initial_result.stdout, 10),
+            }, ensure_ascii=False)},
+        ]
+        attempts: List[Dict[str, Any]] = []
+
+        for attempt in range(1, self.max_repair_attempts + 1):
+            try:
+                data = self._ollama(messages=history, schema=schema, timeout=90)
+                command = data["command"].strip().splitlines()[0]
+            except Exception as e:
+                _warn(f"Ollama repair suggestion failed: {e}")
+                break
+
+            history.append({"role": "assistant", "content": json.dumps(data, ensure_ascii=False)})
+            result, success = self._run_repair_cmd(command, step, attempt)
+            attempt_record = {
+                "attempt": attempt,
+                "command": command,
+                "returncode": result.returncode,
+                "stderr_tail": _tail(result.stderr, 5),
+                "result": result,
+                "success": success,
+            }
+            attempts.append(attempt_record)
+
+            if success:
+                break
+
+            history.append({"role": "user", "content": json.dumps({
+                "executed": command,
+                "returncode": result.returncode,
+                "stderr": _tail(result.stderr, 15),
+                "stdout": _tail(result.stdout, 10),
+                "message": "Aquesta comanda ha fallat. Proposa una alternativa diferent.",
+            }, ensure_ascii=False)})
+
+        return attempts
