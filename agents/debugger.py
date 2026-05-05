@@ -108,3 +108,60 @@ class RepairKB:
             lines.append(f"Fix: `{e['fix_command']}`")
             lines.append(f"Vist: {e['success_count']} vegades · Font: {e['source']}\n")
         (self._dir / f"repair_kb_{stack}.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+@dataclass
+class Diagnosis:
+    error_type: str
+    description: str
+    can_fix_automatically: bool
+    keywords: List[str] = field(default_factory=list)
+
+
+@dataclass
+class RepairResult:
+    repaired: bool
+    source: str          # "kb" | "ollama" | "anthropic" | "none"
+    fix_command: Optional[str]
+    diagnosis: Optional[Diagnosis]
+    execution_results: List[Any]          # List[ExecutionResult] from v5.py
+    repair_attempts: List[Dict[str, Any]] # [{attempt, command, returncode, stderr_tail}]
+
+    def to_step_error(self, step: Any) -> Any:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent.parent))
+        from universal_repo_agent_v5 import StepError, tail_lines
+        last = self.execution_results[-1] if self.execution_results else None
+        return StepError(
+            step_id=step.id,
+            step_title=step.title,
+            command=step.command,
+            cwd=step.cwd,
+            returncode=last.returncode if last else -1,
+            stdout_tail=tail_lines(last.stdout, 8) if last else "",
+            stderr_tail=tail_lines(last.stderr, 8) if last else "",
+            diagnosis=(
+                f"[{self.diagnosis.error_type}] {self.diagnosis.description}"
+                if self.diagnosis else ""
+            ),
+            repaired=self.repaired,
+        )
+
+
+_SECRETS_PATH = Path.home() / ".universal-agent" / "secrets.json"
+
+
+def _read_api_key() -> Optional[str]:
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if key:
+        return key
+    try:
+        secrets = json.loads(_SECRETS_PATH.read_text(encoding="utf-8"))
+        return secrets.get("anthropic_api_key")
+    except Exception:
+        return None
+
+
+def _make_anthropic_client(api_key: str) -> Any:
+    import anthropic
+    return anthropic.Anthropic(api_key=api_key)
