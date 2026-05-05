@@ -2413,27 +2413,6 @@ def refine_plan_with_model(analysis: RepoAnalysis, plan: ExecutionPlan, model: s
     return plan
 
 
-def diagnose_error_with_model(model: str, step: CommandStep, result: ExecutionResult) -> str:
-    schema = {"type": "object", "properties": {"diagnosis": {"type": "string"}, "likely_cause": {"type": "string", "enum": ["missing_dependency", "wrong_config", "missing_env_var", "network_error", "permission_error", "broken_repo", "wrong_version", "port_conflict", "other"]}, "can_be_fixed_automatically": {"type": "boolean"}}, "required": ["diagnosis", "likely_cause", "can_be_fixed_automatically"]}
-    try:
-        data = ollama_chat_json(model=model, messages=[{"role": "system", "content": "Diagnose this failed deployment command. Be concise and specific. Output JSON only."}, {"role": "user", "content": json.dumps({"command": result.command, "cwd": result.cwd, "returncode": result.returncode, "stdout": tail_lines(result.stdout, 20), "stderr": tail_lines(result.stderr, 20)}, ensure_ascii=False)}], schema=schema, timeout=60)
-        return f"[{data.get('likely_cause', 'other')}] {data.get('diagnosis', 'Error desconegut')}"
-    except Exception:
-        return "No s'ha pogut diagnosticar l'error automàticament."
-
-
-def ask_model_for_repair(model: str, analysis: RepoAnalysis, step: CommandStep, result: ExecutionResult) -> Optional[str]:
-    schema = {"type": "object", "properties": {"command": {"type": "string"}, "reason": {"type": "string"}}, "required": ["command", "reason"]}
-    try:
-        data = ollama_chat_json(model=model, messages=[{"role": "system", "content": "Suggest ONE replacement shell command to fix this failed deployment step. Constraints: no sudo, no destructive changes, Linux only, must run in given cwd. Output JSON only."}, {"role": "user", "content": json.dumps({"failed_command": step.command, "cwd": step.cwd, "returncode": result.returncode, "stderr": tail_lines(result.stderr, 15), "stdout": tail_lines(result.stdout, 10)}, ensure_ascii=False)}], schema=schema, timeout=90)
-        command = data["command"].strip().splitlines()[0]
-        validate_command(command, repo_root=Path(analysis.root))
-        return command
-    except Exception as e:
-        warn(f"Suggeriment de reparació ha fallat: {e}")
-        return None
-
-
 def print_analysis(analysis: RepoAnalysis) -> None:
     print("\n=== ANÀLISI DEL REPOSITORI ===")
     print(f"Arrel: {analysis.root}")
@@ -2546,65 +2525,19 @@ def execute_plan(analysis: RepoAnalysis, plan: ExecutionPlan, model: str, worksp
             info("Step succeeded.")
             continue
         warn(f"Step failed with code {current_result.returncode}.")
-        diagnosis = diagnose_error_with_model(model, step, current_result)
-        repaired = False
-        _repair_attempts: list = []
-        for attempt in range(1, MAX_REPAIR_ATTEMPTS + 1):
-            fix_cmd = ask_model_for_repair(model, analysis, step, current_result)
-            if not fix_cmd:
-                break
-            warn(f"Repair attempt {attempt}: {fix_cmd}")
-            if not approve_all:
-                answer = input("Execute repair command? [y/N]: ").strip().lower()
-                if answer not in {"y", "yes", "s", "si"}:
-                    warn("Repair skipped by user.")
-                    break
-            if step.category == "run":
-                fix_to_run, fix_bg = maybe_background_command(fix_cmd)
-            else:
-                fix_to_run, fix_bg = fix_cmd, False
-            repair_result = run_shell(fix_to_run, cwd=Path(step.cwd), repo_root=repo_root)
-            repair_result.step_id = step.id
-            repair_result.repaired = True
-            results.append(repair_result)
-            write_log(log_dir, f"{idx:02d}_{slugify(step.id)}_repair{attempt}.log", f"REPAIR COMMAND: {fix_to_run}\nCWD: {repair_result.cwd}\nRETURNCODE: {repair_result.returncode}\n\nSTDOUT:\n{repair_result.stdout}\n\nSTDERR:\n{repair_result.stderr}\n")
-            _repair_attempts.append({"attempt": attempt, "command": fix_cmd, "returncode": repair_result.returncode, "stderr_tail": tail_lines(repair_result.stderr, 5)})
-            success = repair_result.returncode == 0
-            if success and fix_bg:
-                pid = _extract_agent_pid(repair_result.stdout)
-                register_service(workspace=workspace, repo_name=analysis.repo_name, step_id=step.id,
-                                 cwd=step.cwd, command=fix_cmd, pid=pid,
-                                 log_file=str(Path(step.cwd) / ".agent_last_run.log"))
-            if success and step.category == "run":
-                success = verify_step(step)
-                if not success:
-                    repair_result.returncode = 1
-                    repair_result.stderr += "\nVerification failed after repair: service did not become reachable.\n"
-            if success:
-                info("Repair succeeded.")
-                repaired = True
-                break
-            current_result = repair_result
-        errors.append(StepError(step_id=step.id, step_title=step.title, command=step.command, cwd=step.cwd, returncode=current_result.returncode, stdout_tail=tail_lines(current_result.stdout, 8), stderr_tail=tail_lines(current_result.stderr, 8), diagnosis=diagnosis, repaired=repaired))
-        if not repaired:
-            try:
-                import sys as _sys
-                _sys.path.insert(0, str(Path(__file__).parent))
-                from agents.error_reporter import ErrorReporter as _ER
-                _stack = ", ".join(sorted({s.service_type for s in analysis.services}))
-                _reporter = _ER(workspace=workspace)
-                _report = _reporter.generate(
-                    step_error=errors[-1],
-                    repair_attempts=_repair_attempts,
-                    repo_root=repo_root,
-                    repo_name=analysis.repo_name,
-                    stack_name=_stack,
-                    missing_deps=list(analysis.missing_system_deps),
-                    full_stderr=tail_lines(current_result.stderr, 20),
-                )
-                _reporter.save_and_print(_report)
-            except Exception as _re:
-                warn(f"ErrorReporter: {_re}")
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent))
+        from agents.debugger import IntelligentDebugger
+        _debugger = IntelligentDebugger(
+            model=model,
+            analysis=analysis,
+            workspace=workspace,
+            max_repair_attempts=MAX_REPAIR_ATTEMPTS,
+        )
+        _repair = _debugger.repair(step, current_result, approve_all=approve_all)
+        results.extend(r for r in _repair.execution_results if r is not current_result)
+        errors.append(_repair.to_step_error(step))
+        repaired = _repair.repaired
         if step.critical and not repaired:
             raise AgentError(f"Critical step failed: {step.title}")
     return results, errors
