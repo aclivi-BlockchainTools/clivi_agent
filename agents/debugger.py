@@ -275,6 +275,8 @@ class IntelligentDebugger:
             register_service, verify_step as _verify_step,
             _extract_agent_pid, ExecutionResult,
         )
+        # Elimina '| head N' / '2>&1 | head N' finals que emmascareu el codi de sortida
+        command = re.sub(r'\s*(?:2>&1\s*)?\|\s*(?:head|tail)\s+[-\d]+\s*$', '', command).rstrip()
         repo_root = Path(self.analysis.root)
         try:
             validate_command(command, repo_root=repo_root)

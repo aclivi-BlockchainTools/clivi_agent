@@ -667,27 +667,37 @@ def is_docker_available() -> bool:
     return run_check("docker info")
 
 
+_PG_URL_RE = re.compile(
+    r'DATABASE_URL\s*=\s*["\']?(postgresql|postgres)://([^:@\s]+):([^@\s]+)@(localhost|127\.0\.0\.1)[:/]?\d*/([^\s"\'?]+)'
+)
+
+
 def _build_pg_credentials_step(root: Path) -> Optional["CommandStep"]:
     """
-    Si el repo té un DATABASE_URL postgresql://user:pass@localhost/db diferent
-    del de l'agent (agentuser/agentdb), afegeix un pas que crea aquell usuari
-    i BD dins de agent-postgres. Evita que start.sh falli per credencials errònies.
+    Escaneja TOTS els fitxers .env del repo (root + subdirectoris).
+    Si troba un DATABASE_URL postgresql amb user/BD diferent de l'agent,
+    afegeix un pas que crea aquell usuari i BD a agent-postgres.
     """
+    # Cerca a root i un nivell de subdirectoris (evita node_modules, .venv, etc.)
+    candidates: List[Path] = []
     for name in (".env", ".env.example", ".env.sample", ".env.template"):
-        env_text = read_text(root / name, max_chars=2000)
-        m = re.search(
-            r'DATABASE_URL\s*=\s*["\']?(postgresql|postgres)://([^:@\s]+):([^@\s]+)@(localhost|127\.0\.0\.1)[:/]?\d*/([^\s"\'?]+)',
-            env_text,
-        )
+        candidates.append(root / name)
+        for subdir in root.iterdir():
+            if subdir.is_dir() and subdir.name not in SKIP_DIRS:
+                candidates.append(subdir / name)
+
+    for env_path in candidates:
+        env_text = read_text(env_path, max_chars=2000)
+        m = _PG_URL_RE.search(env_text)
         if not m:
             continue
         user, password, db = m.group(2), m.group(3), m.group(5).rstrip("/")
         if user == "agentuser" and db == "agentdb":
-            return None  # ja coincideix amb les de l'agent
+            continue  # ja coincideix amb les de l'agent, seguim buscant
         cmd = (
-            f'docker exec agent-postgres psql -U agentuser '
+            f'docker exec agent-postgres psql -U agentuser -d agentdb '
             f'-c "CREATE USER {user} WITH PASSWORD \'{password}\'" 2>/dev/null; '
-            f'docker exec agent-postgres psql -U agentuser '
+            f'docker exec agent-postgres psql -U agentuser -d agentdb '
             f'-c "CREATE DATABASE {db} OWNER {user}" 2>/dev/null; true'
         )
         return CommandStep(
