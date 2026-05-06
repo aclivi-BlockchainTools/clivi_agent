@@ -59,7 +59,7 @@ DEFAULT_VERIFY_TIMEOUT = 120
 SAFE_COMMAND_PREFIXES = {
     "ls", "pwd", "cat", "echo", "cp", "mv", "mkdir", "rm", "find", "grep", "sed", "awk", "env", "printenv", "which", "test", "true", "false",
     "sleep", "wait", "kill", "pkill",
-    "git", "unzip", "tar", "curl", "wget", "ss", "lsof", "ps", "df", "du",
+    "git", "unzip", "tar", "curl", "wget", "ss", "lsof", "ps", "df", "du", "chmod",
     "node", "npm", "npx", "yarn", "pnpm", "corepack",
     "python", "python3", "pip", "pip3", "pytest", "uvicorn", "flask", "django-admin", "alembic", "poetry", "streamlit", "gunicorn", "celery", "daphne", "hypercorn",
     "docker", "docker-compose", "compose",
@@ -665,6 +665,41 @@ def build_setup_script_step(script_path: Path, repo_root: Path) -> Optional[Comm
 
 def is_docker_available() -> bool:
     return run_check("docker info")
+
+
+def _build_pg_credentials_step(root: Path) -> Optional["CommandStep"]:
+    """
+    Si el repo té un DATABASE_URL postgresql://user:pass@localhost/db diferent
+    del de l'agent (agentuser/agentdb), afegeix un pas que crea aquell usuari
+    i BD dins de agent-postgres. Evita que start.sh falli per credencials errònies.
+    """
+    for name in (".env", ".env.example", ".env.sample", ".env.template"):
+        env_text = read_text(root / name, max_chars=2000)
+        m = re.search(
+            r'DATABASE_URL\s*=\s*["\']?(postgresql|postgres)://([^:@\s]+):([^@\s]+)@(localhost|127\.0\.0\.1)[:/]?\d*/([^\s"\'?]+)',
+            env_text,
+        )
+        if not m:
+            continue
+        user, password, db = m.group(2), m.group(3), m.group(5).rstrip("/")
+        if user == "agentuser" and db == "agentdb":
+            return None  # ja coincideix amb les de l'agent
+        cmd = (
+            f'docker exec agent-postgres psql -U agentuser '
+            f'-c "CREATE USER {user} WITH PASSWORD \'{password}\'" 2>/dev/null; '
+            f'docker exec agent-postgres psql -U agentuser '
+            f'-c "CREATE DATABASE {db} OWNER {user}" 2>/dev/null; true'
+        )
+        return CommandStep(
+            id="db-create-repo-user",
+            title=f"Crea l'usuari '{user}' i BD '{db}' a agent-postgres per al repo",
+            cwd="/tmp",
+            command=cmd,
+            expected_outcome=f"Usuari {user} i BD {db} existents a agent-postgres",
+            category="db",
+            critical=False,
+        )
+    return None
 
 
 def build_db_provision_steps(db_hints: List[str]) -> Tuple[List[CommandStep], Dict[str, str]]:
@@ -2097,6 +2132,10 @@ def build_deterministic_plan(analysis: RepoAnalysis) -> ExecutionPlan:
         db_steps, _ = build_db_provision_steps(analysis.db_hints)
         steps.extend(db_steps)
         notes.append(f"BD provisionada automàticament via Docker: {', '.join(analysis.db_hints)}.")
+        if "postgresql" in analysis.db_hints:
+            cred_step = _build_pg_credentials_step(root)
+            if cred_step:
+                steps.append(cred_step)
     elif analysis.likely_db_needed and not is_docker_available():
         notes.append("⚠️  Cal una BD però Docker no està disponible. Instal·la Docker o configura les credencials manualment al .env.")
     for script_rel in analysis.setup_scripts_found:

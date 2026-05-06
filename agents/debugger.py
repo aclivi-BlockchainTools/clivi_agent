@@ -464,7 +464,9 @@ class IntelligentDebugger:
         all_attempts: List[Dict[str, Any]] = []
 
         # 1. KB lookup — if known fix exists, try it first
-        kb_entry = self._kb_scan(stack, initial_result.stderr)
+        # Usa stdout com a fallback si stderr és buit (ex: start.sh escriu tot a stdout)
+        kb_search_text = initial_result.stderr or initial_result.stdout
+        kb_entry = self._kb_scan(stack, kb_search_text)
         if kb_entry:
             kb_cmd = kb_entry["fix_command"]
             _info(f"KB hit: {kb_cmd}")
