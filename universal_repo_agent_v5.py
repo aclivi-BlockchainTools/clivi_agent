@@ -2706,7 +2706,16 @@ def refresh_repo_config(workspace: Path, repo_name: str) -> int:
     print(f"\n🔄 Refrescant configuració de: {repo_root}")
     emergent = detect_emergent_stack(repo_root)
     if not emergent:
-        err(f"El repositori no sembla un stack Emergent (no té backend/ + frontend/).")
+        # Per stacks no-Emergent: si té start.sh, stop + restart
+        start_sh = repo_root / "start.sh"
+        if start_sh.exists():
+            info(f"Stack no-Emergent detectat. Reiniciant via start.sh...")
+            subprocess.run(["bash", str(start_sh), "stop"], cwd=str(repo_root),
+                           capture_output=True)
+            stop_services(workspace, repo_name)
+            r = subprocess.run(["bash", str(start_sh)], cwd=str(repo_root))
+            return r.returncode
+        err(f"El repositori no és Emergent (FastAPI+React+Mongo) ni té start.sh.")
         print(f"   Path: {repo_root}")
         return 1
     # Purgem els valors antics perquè es regenerin

@@ -156,6 +156,31 @@ sense rebre SIGTERM. El registry queda buit però els processos OS continuen.
 **Fix:** `del data[name]` en lloc de `data[name] = []` + neteja defensiva a
 `load_services_registry`. Verificació E2E via Bartolo amb streamlit-example.
 
+### ✅ [RESOLT 2026-05-06] Fix #5 — `refresca_repo` fallava per stacks no-Emergent
+**Causa-arrel exacta:** `refresh_repo_config()` (`--refresh`) cridava `detect_emergent_stack()`
+i retornava error si el resultat era `None`. Repos com wavebox-mail (Node.js backend + Vite
+frontend) tenen `backend/` i `frontend/` però no `backend/server.py` (FastAPI) ni MongoDB
+→ `detect_emergent_stack()` retornava `None` → error "no sembla un stack Emergent".
+**Fix** a `universal_repo_agent_v5.py`: si no és Emergent però el repo té `start.sh`,
+fa `bash start.sh stop` + `stop_services()` + `bash start.sh` (stop + restart complet).
+Si no té `start.sh` tampoc, retorna missatge d'error informatiu en lloc del missatge confús
+sobre `backend/` + `frontend/`.
+
+### ✅ [RESOLT 2026-05-06] Fix #6 — wavebox-mail start.sh: crash loop per BD no preparada
+**Causa-arrel exacta:** `start.sh` llançava `docker compose up -d ... &` en background
+(amb `setsid nohup`) i immediatament executava `prisma migrate`. Com que:
+(a) `docker compose` (plugin v2) no estava instal·lat al sistema,
+(b) `pg_isready` tampoc estava instal·lat (no hi ha `postgresql-client`),
+el check de BD semblava OK (falsos negatius), Prisma deia "no migrations" sense crear
+taules, el backend arrencava i petava en bucle (nodemon restart loop) → pressió CPU/RAM
+→ sistema lentíssim → l'usuari reiniciava manualment.
+**Fix** a `wavebox-mail/start.sh`:
+1. Substituït `docker compose` per `docker run` directe com a fallback (crea contenidors
+   `wavebox-postgres` i `wavebox-redis` amb `docker run`, o els reinicia si ja existeixen).
+2. `DOCKER_STARTED` flag: el wait loop de PostgreSQL només s'executa si Docker va arrencar
+   alguna cosa — no espera 30s en va si Docker no estava disponible.
+3. Substituït `pg_isready` per `nc -z localhost 5432` (netcat sempre disponible a Ubuntu).
+
 ## Problemes coneguts pendents (PRIORITAT ALTA → BAIXA)
 
 ### 1. [MITJA] Repos-col·lecció generen 60+ passos
