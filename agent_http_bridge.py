@@ -12,6 +12,9 @@ Endpoints:
     POST /stop                    { "repo": "nom|all" }
     POST /refresh                 { "repo": "nom" }
     POST /update_container/<nom>  → docker pull + stop + rm + run (mateixos params)
+    POST /wizard/start  { "repo_url": "...", "rapid": false }
+    POST /wizard/step   { "wizard_id": "...", "answer": "..." }
+    GET  /wizard/<id>   → estat actual del wizard
     GET  /status        → JSON amb serveis registrats
     GET  /logs?repo=X   → text amb els últims logs
     GET  /health        → {"status": "ok"}
@@ -20,12 +23,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
+import time as _time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
 AGENT_PATH = Path(os.environ.get(
@@ -415,6 +422,15 @@ class Handler(BaseHTTPRequestHandler):
                             "returncode": j["returncode"]} for j in _JOBS.values()]
             summary.sort(key=lambda x: x["started_at"], reverse=True)
             self._json(200, {"jobs": summary, "count": len(summary)})
+        elif parsed.path.startswith("/wizard/"):
+            wid = parsed.path.split("/wizard/", 1)[1].strip("/")
+            with _WIZARDS_LOCK:
+                state = _WIZARDS.get(wid)
+            if not state:
+                self._json(404, {"error": f"wizard {wid} no trobat"}); return
+            self._json(200, {"wizard_id": wid, "step": state["step"],
+                             "job_id": state.get("job_id"),
+                             "repo_url": state["repo_url"]})
         else:
             self._json(404, {"error": "not found"})
 
@@ -473,6 +489,18 @@ class Handler(BaseHTTPRequestHandler):
             if not container_name or "/" in container_name:
                 self._json(400, {"error": "nom de container invàlid"}); return
             self._json(200, _update_container(container_name))
+        elif parsed.path == "/wizard/start":
+            repo_url = str(body.get("repo_url", "")).strip()
+            if not repo_url:
+                self._json(400, {"error": "missing 'repo_url'"}); return
+            rapid = bool(body.get("rapid", False))
+            self._json(200, wizard_start(repo_url, rapid=rapid))
+        elif parsed.path == "/wizard/step":
+            wid = str(body.get("wizard_id", "")).strip()
+            answer = str(body.get("answer", "")).strip()
+            if not wid:
+                self._json(400, {"error": "missing 'wizard_id'"}); return
+            self._json(200, wizard_step(wid, answer))
         elif parsed.path == "/exec_info":
             cmd = str(body.get("cmd", "")).strip()
             if not cmd:
@@ -513,6 +541,354 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
 
+# =============================================================================
+# WIZARD de muntatge
+# =============================================================================
+
+_WIZARDS: Dict[str, Dict[str, Any]] = {}
+_WIZARDS_LOCK = threading.Lock()
+_WIZARDS_MAX = 20
+
+SECRETS_FILE = Path.home() / ".universal-agent" / "secrets.json"
+_SECRET_VAR_RE = re.compile(
+    r'\b([A-Z][A-Z0-9_]{3,}(?:_KEY|_SECRET|_TOKEN|_PASSWORD|_API_KEY|_CLIENT_ID|_CLIENT_SECRET))\b'
+)
+_RAPID_KEYWORDS = {"ràpid", "rapid", "rapido", "defaults", "default",
+                   "munta i prou", "just do it", "skip", "sí", "si", "yes", "y"}
+
+
+def _wizard_load_secrets() -> Dict[str, str]:
+    try:
+        return json.loads(SECRETS_FILE.read_text(encoding="utf-8")) if SECRETS_FILE.exists() else {}
+    except Exception:
+        return {}
+
+
+def _wizard_save_secret(key: str, value: str) -> None:
+    data = _wizard_load_secrets()
+    data[key] = value
+    SECRETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SECRETS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    try:
+        SECRETS_FILE.chmod(0o600)
+    except Exception:
+        pass
+
+
+def _wizard_analyze(repo_url: str) -> Dict[str, Any]:
+    """Clon superficial, detecta stack i secrets necessaris. Retorna dict amb la info."""
+    tmpdir = tempfile.mkdtemp(prefix="bartolo_wizard_")
+    try:
+        r = subprocess.run(
+            ["git", "clone", "--depth", "1", "--filter=blob:none", repo_url, tmpdir],
+            capture_output=True, text=True, timeout=45,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        )
+        if r.returncode != 0:
+            return {"error": f"No s'ha pogut clonar el repo: {r.stderr.strip()[:200]}"}
+
+        root = Path(tmpdir)
+        # Llegeix fitxers de config rellevants
+        config_texts: List[str] = []
+        for fname in (".env.example", ".env.sample", ".env.template", "env.example",
+                      "package.json", "requirements.txt", "docker-compose.yml",
+                      "docker-compose.yaml", "Dockerfile", ".env"):
+            for candidate in [root / fname] + list(root.rglob(fname))[:3]:
+                try:
+                    config_texts.append(candidate.read_text(errors="ignore")[:3000])
+                    break
+                except Exception:
+                    pass
+
+        combined = "\n".join(config_texts)
+
+        # Detecta secrets necessaris (exclou keys massa genèriques)
+        _SKIP = {"SECRET_KEY", "JWT_SECRET", "APP_SECRET", "SESSION_SECRET",
+                 "NEXT_PUBLIC_", "REACT_APP_"}
+        found_secrets = []
+        seen = set()
+        for m in _SECRET_VAR_RE.finditer(combined):
+            v = m.group(1)
+            if v not in seen and not any(v.startswith(s) for s in _SKIP):
+                seen.add(v)
+                found_secrets.append(v)
+
+        # Detecta stack
+        stack_parts = []
+        if (root / "package.json").exists():
+            try:
+                pkg = json.loads((root / "package.json").read_text(errors="ignore"))
+                deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+                if "next" in deps:
+                    stack_parts.append("Next.js")
+                elif "vite" in deps or "@vitejs/plugin-react" in deps:
+                    stack_parts.append("Vite/React")
+                else:
+                    stack_parts.append("Node.js")
+            except Exception:
+                stack_parts.append("Node.js")
+        if (root / "requirements.txt").exists() or list(root.glob("*.py")):
+            txt = combined.lower()
+            if "fastapi" in txt:
+                stack_parts.append("FastAPI")
+            elif "flask" in txt:
+                stack_parts.append("Flask")
+            elif "django" in txt:
+                stack_parts.append("Django")
+            else:
+                stack_parts.append("Python")
+        if (root / "docker-compose.yml").exists() or (root / "docker-compose.yaml").exists():
+            stack_parts.append("Docker Compose")
+        if (root / "Dockerfile").exists():
+            stack_parts.append("Docker")
+
+        # Nom del repo
+        name = Path(repo_url.rstrip("/")).stem.replace(".git", "")
+
+        return {
+            "name": name,
+            "stack": " + ".join(stack_parts) if stack_parts else "Desconegut",
+            "secrets_needed": found_secrets,
+            "has_docker_compose": (root / "docker-compose.yml").exists() or
+                                   (root / "docker-compose.yaml").exists(),
+        }
+    except subprocess.TimeoutExpired:
+        return {"error": "Timeout en clonar el repo (>45s). Comprova la URL."}
+    except Exception as e:
+        return {"error": str(e)[:200]}
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _is_rapid(answer: str) -> bool:
+    a = answer.strip().lower()
+    return a in _RAPID_KEYWORDS or len(a) == 0
+
+
+def _wizard_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Retorna la pregunta del pas actual."""
+    step = state["step"]
+    analysis = state.get("analysis", {})
+    name = analysis.get("name", "repo")
+    default_path = str(WORKSPACE / name)
+
+    if step == "CONFIRM_PATH":
+        return {
+            "step": step,
+            "question": (
+                f"He analitzat el repo.\n"
+                f"Stack: {analysis.get('stack', '?')} | "
+                f"Secrets detectats: {len(state['pending_secrets'])}\n\n"
+                f"On el muntes?\n"
+                f"[Enter per defecte: {default_path}]"
+            ),
+            "done": False,
+        }
+
+    if step == "COLLECT_SECRETS":
+        key = state["pending_secrets"][0]
+        already = len(state["answers"].get("secrets", {}))
+        total = already + len(state["pending_secrets"])
+        return {
+            "step": step,
+            "question": (
+                f"Clau {already + 1}/{total}: falta **{key}**\n"
+                f"Introdueix el valor (o Enter per deixar-la buida):"
+            ),
+            "secret_key": key,
+            "done": False,
+        }
+
+    if step == "DOCKER_PREF":
+        return {
+            "step": step,
+            "question": "Vols usar Docker si és possible? [Sí / No / Auto (recomanat)]",
+            "done": False,
+        }
+
+    if step == "SUMMARY":
+        secrets = state["answers"].get("secrets", {})
+        path = state["answers"].get("mount_path", default_path)
+        docker = state["answers"].get("docker_pref", "auto")
+        secrets_info = f"{len(secrets)} claus configurades" if secrets else "cap clau nova"
+        return {
+            "step": step,
+            "question": (
+                f"Resum:\n"
+                f"  📁 Path: {path}\n"
+                f"  🔑 Secrets: {secrets_info}\n"
+                f"  🐳 Docker: {docker}\n\n"
+                f"Procedir? [Sí / Cancel·lar]"
+            ),
+            "done": False,
+        }
+
+    return {"step": step, "done": True}
+
+
+def _wizard_advance(state: Dict[str, Any], answer: str) -> None:
+    """Aplica la resposta i avança al pas següent."""
+    step = state["step"]
+    analysis = state.get("analysis", {})
+    name = analysis.get("name", "repo")
+    default_path = str(WORKSPACE / name)
+
+    if step == "CONFIRM_PATH":
+        path = answer.strip() or default_path
+        state["answers"]["mount_path"] = path
+        # Pas seguent: secrets pendents o docker
+        if state["pending_secrets"]:
+            state["step"] = "COLLECT_SECRETS"
+        elif analysis.get("has_docker_compose"):
+            state["step"] = "DOCKER_PREF"
+        else:
+            state["step"] = "SUMMARY"
+
+    elif step == "COLLECT_SECRETS":
+        key = state["pending_secrets"].pop(0)
+        value = answer.strip()
+        if value:
+            state["answers"].setdefault("secrets", {})[key] = value
+            _wizard_save_secret(key, value)
+        if state["pending_secrets"]:
+            state["step"] = "COLLECT_SECRETS"  # continua amb la seguent clau
+        elif analysis.get("has_docker_compose"):
+            state["step"] = "DOCKER_PREF"
+        else:
+            state["step"] = "SUMMARY"
+
+    elif step == "DOCKER_PREF":
+        a = answer.strip().lower()
+        if a in {"no", "n"}:
+            state["answers"]["docker_pref"] = "no"
+        elif a in {"sí", "si", "s", "yes", "y"}:
+            state["answers"]["docker_pref"] = "yes"
+        else:
+            state["answers"]["docker_pref"] = "auto"
+        state["step"] = "SUMMARY"
+
+    elif step == "SUMMARY":
+        a = answer.strip().lower()
+        if a in {"cancel·lar", "cancel", "no", "n"}:
+            state["step"] = "CANCELLED"
+        else:
+            state["step"] = "LAUNCHING"
+
+
+def _wizard_launch(state: Dict[str, Any]) -> str:
+    """Construeix els args i llança el job. Retorna job_id."""
+    analysis = state.get("analysis", {})
+    name = analysis.get("name", "repo")
+    default_path = str(WORKSPACE / name)
+    mount_path = state["answers"].get("mount_path", default_path)
+    docker_pref = state["answers"].get("docker_pref", "auto")
+
+    workspace_parent = str(Path(mount_path).parent)
+    args = [
+        "--input", state["repo_url"],
+        "--workspace", workspace_parent,
+        "--execute", "--approve-all", "--non-interactive",
+        "--no-model-refine", "--no-readme",
+    ]
+    if docker_pref == "yes":
+        args.append("--dockerize")
+
+    return _start_job(args, timeout=LAUNCH_TIMEOUT)
+
+
+def _wizard_skip_to_launch(state: Dict[str, Any]) -> None:
+    """Salta tots els passos i va directament a LAUNCHING."""
+    state["pending_secrets"] = []
+    state["answers"].setdefault("mount_path", str(WORKSPACE / state["analysis"].get("name", "repo")))
+    state["answers"].setdefault("docker_pref", "auto")
+    state["step"] = "LAUNCHING"
+
+
+def wizard_start(repo_url: str, rapid: bool = False) -> Dict[str, Any]:
+    """Crea un nou wizard. Fa l'anàlisi síncronament i retorna la 1a pregunta."""
+    analysis = _wizard_analyze(repo_url)
+    if "error" in analysis:
+        return {"error": analysis["error"]}
+
+    # Secrets que falten al cache
+    cached = _wizard_load_secrets()
+    pending = [s for s in analysis["secrets_needed"] if s not in cached or not cached[s]]
+
+    import uuid
+    wid = uuid.uuid4().hex[:8]
+    state: Dict[str, Any] = {
+        "id": wid,
+        "repo_url": repo_url,
+        "step": "CONFIRM_PATH",
+        "analysis": analysis,
+        "pending_secrets": pending,
+        "answers": {},
+        "job_id": None,
+        "created_at": _time.time(),
+    }
+
+    if rapid:
+        _wizard_skip_to_launch(state)
+
+    if state["step"] == "LAUNCHING":
+        jid = _wizard_launch(state)
+        state["job_id"] = jid
+        state["step"] = "DONE"
+
+    with _WIZARDS_LOCK:
+        # GC: elimina wizards vells si n'hi ha massa
+        if len(_WIZARDS) >= _WIZARDS_MAX:
+            oldest = sorted(_WIZARDS.items(), key=lambda x: x[1]["created_at"])
+            for k, _ in oldest[:5]:
+                _WIZARDS.pop(k, None)
+        _WIZARDS[wid] = state
+
+    if state["step"] == "DONE":
+        return {"wizard_id": wid, "done": True, "job_id": state["job_id"],
+                "step": "LAUNCHING"}
+
+    q = _wizard_next_question(state)
+    return {"wizard_id": wid, **q}
+
+
+def wizard_step(wizard_id: str, answer: str) -> Dict[str, Any]:
+    """Avança el wizard un pas. Retorna la seguent pregunta o done+job_id."""
+    with _WIZARDS_LOCK:
+        state = _WIZARDS.get(wizard_id)
+    if not state:
+        return {"error": f"Wizard '{wizard_id}' no trobat o caducat"}
+    if state["step"] in ("DONE", "CANCELLED"):
+        return {"wizard_id": wizard_id, "step": state["step"], "done": True,
+                "job_id": state.get("job_id")}
+
+    # Detecció de mode ràpid en qualsevol pas
+    if _is_rapid(answer) and state["step"] != "SUMMARY":
+        _wizard_skip_to_launch(state)
+    else:
+        _wizard_advance(state, answer)
+
+    if state["step"] == "CANCELLED":
+        with _WIZARDS_LOCK:
+            _WIZARDS[wizard_id] = state
+        return {"wizard_id": wizard_id, "step": "CANCELLED", "done": True,
+                "message": "Muntatge cancel·lat."}
+
+    if state["step"] == "LAUNCHING":
+        jid = _wizard_launch(state)
+        state["job_id"] = jid
+        state["step"] = "DONE"
+        with _WIZARDS_LOCK:
+            _WIZARDS[wizard_id] = state
+        return {"wizard_id": wizard_id, "done": True, "job_id": jid, "step": "LAUNCHING"}
+
+    with _WIZARDS_LOCK:
+        _WIZARDS[wizard_id] = state
+
+    q = _wizard_next_question(state)
+    return {"wizard_id": wizard_id, **q}
+
+
+# =============================================================================
 _INFO_SAFE_PREFIXES = (
     "docker inspect", "docker ps", "docker images", "docker version",
     "docker logs", "docker stats", "docker top", "docker port",

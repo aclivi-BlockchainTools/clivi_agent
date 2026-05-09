@@ -1,8 +1,8 @@
 """
 title: Universal Repo Agent
 author: usuari
-version: 2.8
-description: Pont a l'agent universal local. Suporta async, exec_shell amb confirmació i upload de ZIPs.
+version: 2.9
+description: Pont a l'agent universal local. Suporta async, wizard de muntatge, exec_shell i upload de ZIPs.
 """
 import json
 import os
@@ -101,6 +101,49 @@ class Tools:
                 f"Estat: {r.get('status')}\n"
                 f"--- sortida fins ara ---\n{out}\n\n"
                 f"Consulta el resultat final amb: consulta_estat_job('{job_id}')")
+
+    # ---------- v2.9: wizard de muntatge pas a pas ----------
+    def inicia_muntatge(self, repo_url: str, rapid: bool = False) -> str:
+        """
+        Inicia el muntatge guiat d'un repo amb wizard interactiu.
+        Analitza el repo, pregunta on muntar-lo, recull les claus API que falten
+        i confirma la configuració ABANS d'executar res.
+        Si rapid=True (o l'usuari diu 'ràpid'/'defaults'), salta el wizard i munta amb defaults.
+        Usa SEMPRE aquesta funció en lloc de executa_repo_async per a repos nous.
+        :param repo_url: URL del repo (GitHub, GitLab, Bitbucket) o ruta local a ZIP.
+        :param rapid: Si True, salta el wizard i usa tots els valors per defecte.
+        """
+        r = self._post("/wizard/start", {"repo_url": repo_url, "rapid": rapid}, timeout=60)
+        if "error" in r:
+            return f"❌ Error: {r['error']}"
+        if r.get("done"):
+            # Mode ràpid: job ja llançat, espera resultat
+            return f"🚀 Mode ràpid activat.\n\n" + self._wait_for_job(r["job_id"])
+        return (f"🧙 Wizard iniciat (id: `{r['wizard_id']}`)\n\n"
+                f"{r.get('question', '')}\n\n"
+                f"_Respon amb `respon_wizard('{r['wizard_id']}', 'la teva resposta')`_\n"
+                f"_(O di 'ràpid' per saltar el wizard i usar valors per defecte)_")
+
+    def respon_wizard(self, wizard_id: str, resposta: str) -> str:
+        """
+        Envia la resposta de l'usuari al pas actual del wizard de muntatge.
+        Retorna la pregunta següent, o el resultat final quan el wizard acaba.
+        Si dius 'ràpid' o 'defaults' en qualsevol pas, salta la resta i munta immediatament.
+        :param wizard_id: identificador retornat per inicia_muntatge.
+        :param resposta: resposta al pas actual (path, clau API, sí/no, etc.).
+        """
+        r = self._post("/wizard/step", {"wizard_id": wizard_id, "answer": resposta}, timeout=60)
+        if "error" in r:
+            return f"❌ Error: {r['error']}"
+        if r.get("step") == "CANCELLED":
+            return "❌ Muntatge cancel·lat."
+        if r.get("done"):
+            job_id = r.get("job_id")
+            if not job_id:
+                return "✅ Wizard completat."
+            return f"🚀 Llançant el muntatge...\n\n" + self._wait_for_job(job_id)
+        return (f"{r.get('question', '')}\n\n"
+                f"_Respon amb `respon_wizard('{wizard_id}', 'la teva resposta')`_")
 
     # ---------- agent: execució de repos ----------
     def executa_repo_async(self, input: str, dockerize: bool = False) -> str:
