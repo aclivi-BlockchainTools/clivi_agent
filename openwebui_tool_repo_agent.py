@@ -1,7 +1,7 @@
 """
 title: Universal Repo Agent
 author: usuari
-version: 2.6
+version: 2.7
 description: Pont a l'agent universal local. Suporta async, exec_shell amb confirmació i upload de ZIPs.
 """
 import json
@@ -193,6 +193,21 @@ class Tools:
         if len(out) > 4000:
             out = out[-4000:]
         return out
+
+    # ---------- v2.7: actualització de containers Docker ----------
+    def actualitza_container(self, container: str = "open-webui") -> str:
+        """
+        Actualitza un container Docker existent: baixa la nova imatge, atura el container,
+        l'elimina i el torna a crear amb els mateixos paràmetres (ports, volums, variables d'entorn).
+        Usa-la quan l'usuari vulgui actualitzar OpenWebUI o un altre container gestionat.
+        :param container: nom del container Docker a actualitzar (per defecte 'open-webui').
+        """
+        r = self._post(f"/update_container/{container}", {}, timeout=360)
+        if "error" in r:
+            return f"❌ Error actualitzant '{container}': {r['error']}\n{r.get('log', '')}"
+        return (f"✅ Container '{container}' actualitzat correctament.\n"
+                f"Imatge: {r.get('image')}\n\n"
+                f"--- log ---\n{r.get('log', '')}")
 
     # ---------- v2.3: shell amb confirmació ----------
     def proposa_comanda_shell(self, cmd: str) -> str:

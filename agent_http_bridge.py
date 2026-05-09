@@ -9,8 +9,9 @@ Endpoints:
     GET  /job/<id>/stream    → últimes N línies del log (polling; ?n=50)
     GET  /jobs               → llista de jobs (en execució i acabats)
     POST /analyze       { "input": ... }
-    POST /stop          { "repo": "nom|all" }
-    POST /refresh       { "repo": "nom" }
+    POST /stop                    { "repo": "nom|all" }
+    POST /refresh                 { "repo": "nom" }
+    POST /update_container/<nom>  → docker pull + stop + rm + run (mateixos params)
     GET  /status        → JSON amb serveis registrats
     GET  /logs?repo=X   → text amb els últims logs
     GET  /health        → {"status": "ok"}
@@ -467,6 +468,11 @@ class Handler(BaseHTTPRequestHandler):
             if not repo:
                 self._json(400, {"error": "missing 'repo'"}); return
             self._json(200, _run_agent(["--workspace", str(WORKSPACE), "--refresh", repo], timeout=60))
+        elif parsed.path.startswith("/update_container/"):
+            container_name = parsed.path.split("/update_container/", 1)[1].strip("/")
+            if not container_name or "/" in container_name:
+                self._json(400, {"error": "nom de container invàlid"}); return
+            self._json(200, _update_container(container_name))
         elif parsed.path == "/exec_shell":
             cmd = str(body.get("cmd", "")).strip()
             if not cmd:
@@ -491,6 +497,83 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, _shell_execute(cmd, timeout=timeout))
         else:
             self._json(404, {"error": "not found"})
+
+
+def _update_container(name: str) -> dict:
+    """
+    Actualitza un container Docker existent:
+    1. docker pull <image>
+    2. docker stop <name>
+    3. docker rm <name>
+    4. docker run amb els mateixos paràmetres (ports, volums, envs, extra-hosts)
+    """
+    # 1. Inspeccionar el container actual
+    insp = subprocess.run(["docker", "inspect", name], capture_output=True, text=True)
+    if insp.returncode != 0:
+        return {"error": f"Container '{name}' no trobat: {insp.stderr.strip()[:200]}"}
+    try:
+        data = json.loads(insp.stdout)[0]
+    except Exception as e:
+        return {"error": f"No s'ha pogut llegir la inspecció: {e}"}
+
+    image = data["Config"]["Image"]
+    hc = data.get("HostConfig", {})
+
+    # Reconstruir flags
+    port_flags: list[str] = []
+    for cport, bindings in (hc.get("PortBindings") or {}).items():
+        cp = cport.split("/")[0]
+        for b in (bindings or []):
+            hp = b.get("HostPort", "")
+            if hp:
+                port_flags += ["-p", f"{hp}:{cp}"]
+
+    vol_flags: list[str] = []
+    for m in (data.get("Mounts") or []):
+        if m["Type"] == "volume":
+            vol_flags += ["-v", f"{m['Name']}:{m['Destination']}"]
+        elif m["Type"] == "bind":
+            vol_flags += ["-v", f"{m['Source']}:{m['Destination']}"]
+
+    env_flags: list[str] = []
+    skip_pfx = ("PATH=", "HOME=", "HOSTNAME=", "TERM=")
+    for e in (data.get("Config", {}).get("Env") or []):
+        if not any(e.startswith(p) for p in skip_pfx):
+            env_flags += ["-e", e]
+
+    host_flags: list[str] = []
+    for h in (hc.get("ExtraHosts") or []):
+        host_flags += ["--add-host", h]
+
+    restart = (hc.get("RestartPolicy") or {}).get("Name", "no")
+    restart_flag = ["--restart", restart] if restart and restart != "no" else []
+
+    run_cmd = (["docker", "run", "-d"] + port_flags + vol_flags + env_flags +
+               host_flags + restart_flag + ["--name", name, image])
+
+    log: list[str] = []
+
+    # 2. Pull
+    log.append(f"[pull] docker pull {image}")
+    r = subprocess.run(["docker", "pull", image], capture_output=True, text=True, timeout=300)
+    log.append(r.stdout.strip()[-500:] if r.stdout else r.stderr.strip()[-200:])
+    if r.returncode != 0:
+        return {"error": f"docker pull ha fallat", "log": "\n".join(log)}
+
+    # 3. Stop + rm
+    subprocess.run(["docker", "stop", name], capture_output=True, timeout=30)
+    log.append(f"[stop] docker stop {name} → OK")
+    subprocess.run(["docker", "rm", name], capture_output=True, timeout=15)
+    log.append(f"[rm]   docker rm {name} → OK")
+
+    # 4. Recrear
+    log.append(f"[run]  {' '.join(run_cmd)}")
+    r = subprocess.run(run_cmd, capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        return {"error": f"docker run ha fallat: {r.stderr.strip()[:300]}", "log": "\n".join(log)}
+
+    log.append(f"[ok]   Container '{name}' actualitzat i en marxa")
+    return {"status": "ok", "container": name, "image": image, "log": "\n".join(log)}
 
 
 def main():

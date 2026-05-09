@@ -67,6 +67,10 @@ SAFE_COMMAND_PREFIXES = {
     "bash", "sh", "nohup",
 }
 
+# Containers gestionats manualment que l'agent NO ha de destruir mai.
+# Per actualitzar-los, usar l'endpoint /update_container del bridge.
+PROTECTED_CONTAINERS = {"open-webui", "open-webui-pipelines"}
+
 BLOCKED_PATTERNS = [
     r"\bshutdown\b",
     r"\breboot\b",
@@ -83,6 +87,9 @@ BLOCKED_PATTERNS = [
     r"rm\s+-rf\s+/",
     r"curl\s+.*\|\s*(bash|sh)",
     r"wget\s+.*\|\s*(bash|sh)",
+    # Protegeix containers crítics de destrucció accidental
+    r"docker\s+(stop|kill|rm|remove)\s+[^|&;\n]*\b(" + "|".join(PROTECTED_CONTAINERS) + r")\b",
+    r"docker\s+compose\s+(down|stop|rm)\b",
 ]
 
 SETUP_SCRIPT_NAMES = [
