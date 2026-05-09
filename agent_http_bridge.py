@@ -35,6 +35,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
+# Router d'intencions (opcional — graceful fallback si no existeix)
+try:
+    from bartolo_router import classify as _router_classify, extract_cmd_l1 as _router_extract_cmd
+    _ROUTER_AVAILABLE = True
+except ImportError:
+    _ROUTER_AVAILABLE = False
+
 AGENT_PATH = Path(os.environ.get(
     "UNIVERSAL_AGENT_PATH",
     str(Path.home() / "universal-agent" / "universal_repo_agent_v5.py"),
@@ -327,6 +334,99 @@ async function upload(f){
 }
 </script></body></html>"""
 
+# =============================================================================
+# ROUTER — dispatch per intent
+# =============================================================================
+
+def _router_dispatch(text: str, ollama_url: str = "http://localhost:11434") -> Dict[str, Any]:
+    """Classifica el text i executa el handler corresponent. Sempre retorna un dict."""
+    import datetime as _dt
+
+    if not _ROUTER_AVAILABLE:
+        return {"intent": "error", "error": "bartolo_router.py no trobat al path"}
+
+    classified = _router_classify(text, ollama_url)
+    intent = classified.get("intent", "conversa")
+    source = classified.get("source", "?")
+
+    if intent == "temps_data":
+        now = _dt.datetime.now()
+        dies = ["dilluns","dimarts","dimecres","dijous","divendres","dissabte","diumenge"]
+        mesos = ["gener","febrer","març","abril","maig","juny",
+                 "juliol","agost","setembre","octubre","novembre","desembre"]
+        s = (f"Ara són les {now.strftime('%H:%M')} del "
+             f"{dies[now.weekday()]}, {now.day} de {mesos[now.month-1]} de {now.year}.")
+        return {"intent": intent, "source": source, "result": s}
+
+    if intent == "info_sistema":
+        cmd = classified.get("cmd") or _router_extract_cmd(text)
+        if not cmd:
+            cmd = "docker ps && df -h / && ollama list"
+        if not _info_safe(cmd):
+            return {"intent": intent, "source": source,
+                    "error": f"Comanda no segura per a mode lectura: {cmd[:80]}"}
+        try:
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
+            out = (r.stdout or r.stderr or "").strip()
+            if len(out) > 3000:
+                out = out[-3000:]
+            return {"intent": intent, "source": source,
+                    "cmd": cmd, "result": out or "(sense sortida)"}
+        except Exception as e:
+            return {"intent": intent, "source": source, "error": str(e)}
+
+    if intent == "munta_repo":
+        repo_url = classified.get("repo_url")
+        if not repo_url:
+            return {"intent": intent, "source": source,
+                    "error": "No he pogut extreure la URL. Proporciona-la: 'munta https://github.com/...'"}
+        try:
+            result = wizard_start(repo_url, rapid=False)
+            return {"intent": intent, "source": source, **result}
+        except Exception as e:
+            return {"intent": intent, "source": source, "error": str(e)}
+
+    if intent == "gestio_docker":
+        container_match = re.search(
+            r'\b(open-webui|open-webui-pipelines|[\w][\w-]*)\b', text, re.I)
+        container = "open-webui"
+        if container_match:
+            candidate = container_match.group(1).lower()
+            if candidate not in {"actualitza", "update", "docker", "container", "el", "un", "the"}:
+                container = candidate
+        try:
+            result = _update_container(container)
+            return {"intent": intent, "source": source, **result}
+        except Exception as e:
+            return {"intent": intent, "source": source, "error": str(e)}
+
+    if intent == "cerca_web":
+        return {"intent": intent, "source": source,
+                "redirect": "web_search",
+                "message": "Per a cerques web usa la tool `web_search` directament."}
+
+    # conversa_general — crida Ollama directament
+    import urllib.request as _urllib_req
+    payload = json.dumps({
+        "model": "qwen2.5:14b",
+        "messages": [{"role": "user", "content": text}],
+        "stream": False,
+        "options": {"temperature": 0.7, "num_predict": 512}
+    }).encode()
+    try:
+        req = _urllib_req.Request(
+            f"{ollama_url}/api/chat", data=payload, method="POST",
+            headers={"Content-Type": "application/json"}
+        )
+        with _urllib_req.urlopen(req, timeout=30) as r:
+            resp = json.loads(r.read())
+        answer = resp.get("message", {}).get("content", "")
+        return {"intent": intent, "source": source, "result": answer}
+    except Exception as e:
+        return {"intent": intent, "source": source,
+                "error": f"Error cridant Ollama: {e}"}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stderr.write(f"[bridge] {self.address_string()} - {fmt % args}\n")
@@ -539,6 +639,12 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 timeout = 60
             self._json(200, _shell_execute(cmd, timeout=timeout))
+        elif parsed.path == "/router/dispatch":
+            text = str(body.get("text", "")).strip()
+            if not text:
+                self._json(400, {"error": "missing 'text'"}); return
+            ollama_url = str(body.get("ollama_url", "http://localhost:11434"))
+            self._json(200, _router_dispatch(text, ollama_url=ollama_url))
         else:
             self._json(404, {"error": "not found"})
 
