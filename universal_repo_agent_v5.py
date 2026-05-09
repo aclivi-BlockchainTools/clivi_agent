@@ -371,8 +371,16 @@ def validate_command(command: str, repo_root: Optional[Path] = None) -> None:
 def run_shell(command: str, cwd: Path, timeout: int = 1800, repo_root: Optional[Path] = None) -> ExecutionResult:
     validate_command(command, repo_root=repo_root)
     started = time.time()
+    # Env no-interactiu: evita que apt, npm, bash 'read' pengin esperant stdin
+    env = os.environ.copy()
+    env.update({"CI": "1", "DEBIAN_FRONTEND": "noninteractive", "NONINTERACTIVE": "1",
+                "NPM_CONFIG_YES": "true", "GIT_TERMINAL_PROMPT": "0"})
+    # Alimentem newlines a stdin perquè 'read' rebi la resposta per defecte
+    # en lloc d'EOF (que alguns scripts tracten com a error)
+    stdin_input = "\n" * 40
     try:
-        proc = subprocess.run(command, cwd=str(cwd), shell=True, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(command, cwd=str(cwd), shell=True, capture_output=True,
+                              text=True, timeout=timeout, input=stdin_input, env=env)
     except subprocess.TimeoutExpired:
         return ExecutionResult(step_id="", command=command, cwd=str(cwd), returncode=-1, stdout="", stderr=f"TIMEOUT ({timeout}s)", started_at=started, finished_at=time.time())
     return ExecutionResult(step_id="", command=command, cwd=str(cwd), returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr, started_at=started, finished_at=time.time())
@@ -2149,6 +2157,24 @@ def build_deterministic_plan(analysis: RepoAnalysis) -> ExecutionPlan:
     elif analysis.likely_db_needed and not is_docker_available():
         notes.append("⚠️  Cal una BD però Docker no està disponible. Instal·la Docker o configura les credencials manualment al .env.")
     for script_rel in analysis.setup_scripts_found:
+        script_dir = (root / script_rel).parent
+        # Pre-pas: copia .env.example → .env si no existeix ja,
+        # evita que setup.sh pregunti interactivament si sobreescriure
+        for env_ex_name in (".env.example", ".env.sample", ".env.template", "env.example"):
+            env_ex = script_dir / env_ex_name
+            env_target = script_dir / ".env"
+            if env_ex.exists() and not env_target.exists():
+                rel_ex = env_ex.relative_to(root)
+                rel_tg = env_target.relative_to(root)
+                steps.append(CommandStep(
+                    id=f"env-copy-{slugify(str(rel_tg))}",
+                    title=f"Copia {rel_ex} → {rel_tg}",
+                    cwd=str(root),
+                    command=f"cp {rel_ex} {rel_tg}",
+                    expected_outcome=".env creat des de l'exemple",
+                    category="install", critical=False,
+                ))
+                break
         step = build_setup_script_step(root / script_rel, root)
         if step:
             steps.append(step)
