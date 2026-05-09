@@ -1,7 +1,7 @@
 # test_router.py
 import sys
 sys.path.insert(0, "/home/usuari/universal-agent")
-from bartolo_router import classify_l1
+from bartolo_router import classify_l1, classify
 
 def test_temps_data():
     assert classify_l1("quina hora és?") == "temps_data"
@@ -34,9 +34,41 @@ def test_no_match_returns_none():
     assert classify_l1("explica'm python") is None
     assert classify_l1("escriu-me un poema") is None
 
+def test_classify_dispatch():
+    """Test del punt d'entrada unificat classify()."""
+    r = classify("quina hora és?")
+    assert r["intent"] == "temps_data", f"esperava temps_data, got {r['intent']}"
+    assert r["source"] == "l1"
+
+    r = classify("docker ps")
+    assert r["intent"] == "info_sistema"
+    assert r["source"] == "l1"
+    assert r["cmd"] is not None, "hauria d'extreure comanda"
+
+    r = classify("munta https://github.com/tiangolo/fastapi")
+    assert r["intent"] == "munta_repo"
+    assert r["repo_url"] == "https://github.com/tiangolo/fastapi"
+
+def test_l2_fallback_conversa():
+    """L2: frase ambigua sense patró L1 → algun intent vàlid."""
+    r = classify("hola, com estàs avui?")
+    assert r["intent"] in {"conversa", "temps_data", "info_sistema",
+                           "munta_repo", "gestio_docker", "cerca_web"}
+    assert r["source"] == "l2"
+
+def test_l2_info_with_cmd():
+    """L2: pregunta de sistema sense patró L1 exacte."""
+    r = classify("quanta memòria RAM hi ha lliure al sistema?")
+    # L2 pot retornar info_sistema o conversa — ambdós són vàlids
+    assert r["intent"] in {"info_sistema", "conversa"}
+    # Si retorna info_sistema, ha de tenir cmd
+    if r["intent"] == "info_sistema":
+        assert r["cmd"] is not None
+
 if __name__ == "__main__":
     tests = [test_temps_data, test_info_sistema, test_munta_repo,
-             test_gestio_docker, test_cerca_web, test_no_match_returns_none]
+             test_gestio_docker, test_cerca_web, test_no_match_returns_none,
+             test_classify_dispatch, test_l2_fallback_conversa, test_l2_info_with_cmd]
     failed = 0
     for t in tests:
         try:
@@ -44,6 +76,9 @@ if __name__ == "__main__":
             print(f"  ✅ {t.__name__}")
         except AssertionError as e:
             print(f"  ❌ {t.__name__}: {e}")
+            failed += 1
+        except Exception as e:
+            print(f"  ⚠️  {t.__name__} ERROR: {e}")
             failed += 1
     print(f"\n{len(tests)-failed}/{len(tests)} tests passats")
     sys.exit(1 if failed else 0)
