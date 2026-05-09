@@ -375,11 +375,42 @@ def _router_dispatch(text: str, ollama_url: str = "http://localhost:11434") -> D
         except Exception as e:
             return {"intent": intent, "source": source, "error": str(e)}
 
+    if intent == "start_servei":
+        import os as _os
+        repo_name = classified.get("repo_name") or ""
+        if not repo_name:
+            m = re.search(
+                r'\b(?:arrenca|arrancar|arrencar|reinicia|reiniciar|engega|restart|start)\s+'
+                r'(?:el\s+|la\s+|els?\s+|un\s+)?([\w][\w-]+)\b', text, re.I)
+            repo_name = m.group(1) if m else ""
+        if not repo_name:
+            return {"intent": intent, "source": source,
+                    "error": "No he pogut identificar el nom del servei. Di-me quin repo vols arrencar."}
+        ws = str(WORKSPACE)
+        found = None
+        try:
+            for d in _os.listdir(ws):
+                if d.startswith('.') or d.startswith('_'):
+                    continue
+                if d.lower() == repo_name.lower() or repo_name.lower() in d.lower():
+                    found = d
+                    break
+        except Exception:
+            pass
+        if not found:
+            return {"intent": intent, "source": source,
+                    "error": (f"El servei '{repo_name}' no es troba al workspace. "
+                              f"Usa 'munta URL' per clonar-lo primer.")}
+        result = _run_agent(["--workspace", ws, "--refresh", found], timeout=120)
+        return {"intent": intent, "source": source, "repo": found, **result}
+
     if intent == "munta_repo":
         repo_url = classified.get("repo_url")
         if not repo_url:
             return {"intent": intent, "source": source,
-                    "error": "No he pogut extreure la URL. Proporciona-la: 'munta https://github.com/...'"}
+                    "error": ("No he pogut extreure la URL del repo. "
+                              "Proporciona-la: 'munta https://github.com/...' "
+                              "Si el repo ja existeix al workspace, prova: 'arrenca [nom]'.")}
         try:
             result = wizard_start(repo_url, rapid=False)
             return {"intent": intent, "source": source, **result}
@@ -602,6 +633,14 @@ class Handler(BaseHTTPRequestHandler):
             answer = str(body.get("answer", "")).strip()
             if not wid:
                 self._json(400, {"error": "missing 'wizard_id'"}); return
+            import re as _re
+            if not _re.match(r'^[0-9a-f]{8}$', wid):
+                self._json(400, {"error": (
+                    f"wizard_id invàlid ('{wid[:20]}{'...' if len(wid)>20 else ''}' té {len(wid)} chars, "
+                    f"ha de ser exactament 8 hex). "
+                    f"La resposta de l'usuari va al camp 'answer', no a 'wizard_id'. "
+                    f"Si el wizard ha caducat, crida inicia_muntatge de nou."
+                )}); return
             self._json(200, wizard_step(wid, answer))
         elif parsed.path == "/exec_info":
             cmd = str(body.get("cmd", "")).strip()

@@ -28,9 +28,14 @@ _L1_RULES = [
 
     (re.compile(
         r'github\.com/|gitlab\.com/|bitbucket\.com/|'
-        r'\b(munta|instal[·la]+|clona|desplega|arrenca el repo|'
+        r'\b(munta|instal[·la]+|clona|desplega|'
         r'munta el repo|deploy|mount repo|clone repo)\b', re.I),
      "munta_repo"),
+
+    (re.compile(
+        r'\b(arrenca|arrancar|arrencar|reinicia|reiniciar|torna a engegar|'
+        r'engega|posem en marxa)\b', re.I),
+     "start_servei"),
 
     (re.compile(
         r'\b(actualitza open-webui|actualitza el container|'
@@ -105,6 +110,7 @@ def extract_cmd_l1(text: str) -> Optional[str]:
 _L2_MODEL_PREFERENCES = ["qwen2.5:7b", "qwen2.5:14b"]
 _L2_TIMEOUT = 6  # qwen2.5:7b classification takes ~1-3s; 6s gives headroom without blocking
 _L2_INTENTS = {"temps_data", "info_sistema", "munta_repo", "gestio_docker",
+               "start_servei",
                "cerca_web", "conversa"}
 
 _L2_PROMPT_TMPL = """\
@@ -114,16 +120,18 @@ Respon ÚNICAMENT amb un JSON en una sola línia. Cap text extra.
 Categories:
 - temps_data: preguntes sobre hora, data, dia de la setmana
 - info_sistema: estat del sistema, docker, processos, ports, versions, logs, espai disc
-- munta_repo: muntar, clonar, instal·lar, desplegar un repositori GitHub/GitLab
+- munta_repo: muntar, clonar, instal·lar, desplegar un repositori GitHub/GitLab NOU (requereix URL)
+- start_servei: arrencar, arrancar, reiniciar, engegar un servei/repo JA EXISTENT pel nom (sense URL)
 - gestio_docker: actualitzar o gestionar containers Docker existents
 - cerca_web: cerques a internet, informació externa
 - conversa: qualsevol altra cosa (conversa general, codi, explicacions)
 
 Per a info_sistema, extreu també la comanda shell adequada.
 Per a munta_repo, extreu la URL del repo si n'hi ha.
+Per a start_servei, extreu el nom del servei/repo.
 
 Format de resposta:
-{"intent": "categoria", "cmd": "comanda o null", "repo_url": "url o null"}
+{"intent": "categoria", "cmd": "comanda o null", "repo_url": "url o null", "repo_name": "nom o null"}
 
 Petició: {text}"""
 
@@ -192,21 +200,38 @@ def classify_l2(text: str,
 # Punt d'entrada: classifica text amb L1 → L2
 # ---------------------------------------------------------------------------
 
+_URL_RE = re.compile(r'https?://\S+|(?:github|gitlab|bitbucket)\.com/\S+', re.I)
+_REPO_NAME_RE = re.compile(
+    r'\b(?:arrenca|arrancar|arrencar|reinicia|reiniciar|engega|restart|start)\s+'
+    r'(?:el\s+|la\s+|els?\s+|un\s+)?([\w][\w-]+)\b', re.I)
+
+
 def classify(text: str,
              ollama_url: str = "http://localhost:11434") -> Dict[str, Any]:
     """Classifica el text amb L1 primer, L2 com a fallback.
-    Retorna dict: {"intent": str, "cmd": str|None, "repo_url": str|None, "source": "l1"|"l2"}
+    Retorna dict: {"intent": str, "cmd": str|None, "repo_url": str|None,
+                   "repo_name": str|None, "source": "l1"|"l2"}
     """
     intent_l1 = classify_l1(text)
+
+    # start_servei amb URL present → és realment munta_repo
+    if intent_l1 == "start_servei" and _URL_RE.search(text):
+        intent_l1 = "munta_repo"
+
     if intent_l1:
         cmd = extract_cmd_l1(text) if intent_l1 == "info_sistema" else None
         repo_url = None
+        repo_name = None
         if intent_l1 == "munta_repo":
-            url_match = re.search(
-                r'https?://(?:github|gitlab|bitbucket)\.com/\S+', text, re.I)
+            url_match = _URL_RE.search(text)
             repo_url = url_match.group(0).rstrip(".,);:'\"") if url_match else None
-        return {"intent": intent_l1, "cmd": cmd, "repo_url": repo_url, "source": "l1"}
+        if intent_l1 == "start_servei":
+            m = _REPO_NAME_RE.search(text)
+            repo_name = m.group(1) if m else None
+        return {"intent": intent_l1, "cmd": cmd, "repo_url": repo_url,
+                "repo_name": repo_name, "source": "l1"}
 
     result = classify_l2(text, ollama_url)
     result["source"] = "l2"
+    result.setdefault("repo_name", None)
     return result
