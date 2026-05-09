@@ -473,6 +473,20 @@ class Handler(BaseHTTPRequestHandler):
             if not container_name or "/" in container_name:
                 self._json(400, {"error": "nom de container invàlid"}); return
             self._json(200, _update_container(container_name))
+        elif parsed.path == "/exec_info":
+            cmd = str(body.get("cmd", "")).strip()
+            if not cmd:
+                self._json(400, {"error": "missing 'cmd'"}); return
+            if not _info_safe(cmd):
+                self._json(403, {"error": f"comanda no permesa en mode lectura: {cmd[:80]}"}); return
+            try:
+                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
+                out = (r.stdout or r.stderr or "").strip()
+                if len(out) > 4000:
+                    out = out[-4000:]
+                self._json(200, {"output": out, "returncode": r.returncode})
+            except Exception as e:
+                self._json(500, {"error": str(e)})
         elif parsed.path == "/exec_shell":
             cmd = str(body.get("cmd", "")).strip()
             if not cmd:
@@ -497,6 +511,32 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, _shell_execute(cmd, timeout=timeout))
         else:
             self._json(404, {"error": "not found"})
+
+
+_INFO_SAFE_PREFIXES = (
+    "docker inspect", "docker ps", "docker images", "docker version",
+    "docker logs", "docker stats", "docker top", "docker port",
+    "docker exec", "docker network", "docker volume",
+    "curl http://localhost", "curl http://127.0.0.1", "curl http://host.docker.internal",
+    "systemctl status", "systemctl --user status",
+    "journalctl --user", "journalctl -u",
+    "cat /proc/", "uname", "hostname", "whoami", "id",
+    "ps aux", "ps -ef", "ls ", "du ", "df ",
+    "python3 --version", "node --version", "npm --version",
+    "ollama list", "ollama ps",
+    "ss -tlnp", "lsof -i",
+)
+_INFO_BLOCKED = ("rm ", "kill ", "stop ", "start ", "restart ", "|bash", "|sh", "> /")
+
+def _info_safe(cmd: str) -> bool:
+    c = cmd.strip()
+    for blocked in _INFO_BLOCKED:
+        if blocked in c:
+            return False
+    for prefix in _INFO_SAFE_PREFIXES:
+        if c.startswith(prefix):
+            return True
+    return False
 
 
 def _update_container(name: str) -> dict:

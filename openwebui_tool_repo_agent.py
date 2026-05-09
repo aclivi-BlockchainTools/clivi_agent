@@ -1,7 +1,7 @@
 """
 title: Universal Repo Agent
 author: usuari
-version: 2.7
+version: 2.8
 description: Pont a l'agent universal local. Suporta async, exec_shell amb confirmació i upload de ZIPs.
 """
 import json
@@ -192,6 +192,24 @@ class Tools:
         out = r.get("output") or json.dumps(r, ensure_ascii=False)
         if len(out) > 4000:
             out = out[-4000:]
+        return out
+
+    # ---------- v2.8: consultes de lectura directes (sense confirmació) ----------
+    def consulta_info(self, cmd: str) -> str:
+        """
+        Executa una comanda de lectura al host i retorna la sortida directament, sense necessitat
+        de confirmació. Només per a comandes segures de lectura: docker inspect/ps/logs/version,
+        curl localhost, systemctl status, ps, df, ollama list, etc.
+        Usa-la per respondre preguntes sobre l'estat del sistema (versions, processos, ports, logs...).
+        :param cmd: comanda de lectura a executar (ex: 'docker inspect open-webui', 'ollama list').
+        """
+        r = self._post("/exec_info", {"cmd": cmd}, timeout=20)
+        if "error" in r:
+            return f"❌ {r['error']}"
+        out = r.get("output", "").strip()
+        rc = r.get("returncode", 0)
+        if not out:
+            return f"(sense sortida, rc={rc})"
         return out
 
     # ---------- v2.7: actualització de containers Docker ----------
