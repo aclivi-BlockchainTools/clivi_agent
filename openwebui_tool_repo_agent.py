@@ -129,7 +129,8 @@ class Tools:
         Envia la resposta de l'usuari al pas actual del wizard de muntatge.
         Retorna la pregunta següent, o el resultat final quan el wizard acaba.
         Si dius 'ràpid' o 'defaults' en qualsevol pas, salta la resta i munta immediatament.
-        :param wizard_id: identificador retornat per inicia_muntatge.
+        :param wizard_id: codi de 8 caràcters retornat per inicia_muntatge (ex: 'a1b2c3d4').
+            MAI posis aquí la resposta de l'usuari (clau API, path, etc.) — això va a 'resposta'.
         :param resposta: resposta al pas actual (path, clau API, sí/no, etc.).
         """
         r = self._post("/wizard/step", {"wizard_id": wizard_id, "answer": resposta}, timeout=60)
