@@ -1,8 +1,8 @@
 """
 title: Universal Repo Agent
 author: usuari
-version: 2.9
-description: Pont a l'agent universal local. Suporta async, wizard de muntatge, exec_shell i upload de ZIPs.
+version: 3.0
+description: Router + wizard + exec_shell + upload. v3.0: classifica_i_resol router generalista.
 """
 import json
 import os
@@ -320,3 +320,41 @@ class Tools:
                 f"  {upload_url}\n\n"
                 f"Un cop pujat, copia la ruta retornada i crida:\n"
                 f"  executa_repo_async('/ruta/al/zip/que/has/pujat.zip')")
+
+    # ---------- v3.0: router generalista ----------
+    def classifica_i_resol(self, text: str) -> str:
+        """
+        Router generalista: classifica automàticament la intenció de l'usuari i executa
+        l'acció correcta sense necessitat de seleccionar una tool específica.
+        Usa-la per a preguntes generals, consultes del sistema, hora/data, conversa, i
+        com a primera opció quan no saps quina altra tool usar.
+        Intents suportats: temps_data, info_sistema, munta_repo, gestio_docker, cerca_web, conversa.
+        :param text: text complet del missatge de l'usuari.
+        """
+        r = self._post("/router/dispatch", {"text": text}, timeout=35)
+        if "error" in r:
+            return f"❌ Router error: {r['error']}"
+
+        intent = r.get("intent", "?")
+
+        if r.get("redirect"):
+            return r.get("message", f"Redirigit a: {r['redirect']}")
+
+        if intent == "munta_repo":
+            if r.get("done") and r.get("job_id"):
+                return "🚀 Muntant en mode ràpid...\n\n" + self._wait_for_job(r["job_id"])
+            if r.get("wizard_id"):
+                return (f"🧙 Wizard iniciat (id: `{r['wizard_id']}`)\n\n"
+                        f"{r.get('question', '')}\n\n"
+                        f"_Respon amb `respon_wizard('{r['wizard_id']}', 'la teva resposta')`_")
+            if r.get("error"):
+                return f"❌ {r['error']}"
+
+        result = r.get("result", "")
+        if not result and "error" in r:
+            return f"❌ {r['error']}"
+
+        if intent == "info_sistema":
+            return f"```\n{result}\n```" if result else "(sense sortida)"
+
+        return result or "(sense resposta)"
