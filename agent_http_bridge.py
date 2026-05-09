@@ -455,6 +455,23 @@ def _router_dispatch(text: str, ollama_url: str = "http://localhost:11434") -> D
              f"{dies[now.weekday()]}, {now.day} de {mesos[now.month-1]} de {now.year}.")
         return {"intent": intent, "source": source, "result": s}
 
+    if intent == "estat_workspace":
+        svcs = _workspace_services()
+        if not svcs or svcs.get("_error"):
+            return {"intent": intent, "source": source,
+                    "result": "Cap servei actiu al workspace."}
+        lines = []
+        for repo, comps in svcs.items():
+            running = [s for s, i in comps.items() if i.get("running")]
+            stopped_l = [s for s, i in comps.items() if not i.get("running")]
+            if running:
+                pids = ", ".join(f"{s} (PID {comps[s]['pid']})" for s in running)
+                lines.append(f"✅ {repo}: {pids}")
+            if stopped_l:
+                lines.append(f"⚠️  {repo}: {', '.join(stopped_l)} aturat/s")
+        result = "\n".join(lines) if lines else "Cap servei actiu al workspace."
+        return {"intent": intent, "source": source, "result": result}
+
     if intent == "info_sistema":
         cmd = classified.get("cmd") or _router_extract_cmd(text)
         if not cmd:

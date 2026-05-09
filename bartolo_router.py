@@ -18,6 +18,14 @@ _L1_RULES = [
      "temps_data"),
 
     (re.compile(
+        r'\b(quins serveis|serveis arrancats|serveis actius|repos arrancats|'
+        r'repos actius|que (esta|estan|hi ha) (arrencat|corrent|actiu|engegat)|'
+        r'estat (dels serveis|del workspace|dels repos)|'
+        r'quins repos (corre|corren|estan)|que corre al workspace|'
+        r'llista (de serveis|de repos)|estat serveis)\b', re.I),
+     "estat_workspace"),
+
+    (re.compile(
         r'\b(docker ps|docker inspect|docker version|docker log|docker stat|'
         r'docker top|docker port|docker network|docker volume|docker image|'
         r'quina versió|quina version|ollama list|systemctl status|'
@@ -110,7 +118,7 @@ def extract_cmd_l1(text: str) -> Optional[str]:
 _L2_MODEL_PREFERENCES = ["qwen2.5:7b", "qwen2.5:14b"]
 _L2_TIMEOUT = 6  # qwen2.5:7b classification takes ~1-3s; 6s gives headroom without blocking
 _L2_INTENTS = {"temps_data", "info_sistema", "munta_repo", "gestio_docker",
-               "start_servei",
+               "start_servei", "estat_workspace",
                "cerca_web", "conversa"}
 
 _L2_PROMPT_TMPL = """\
