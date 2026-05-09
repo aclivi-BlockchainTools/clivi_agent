@@ -1,11 +1,12 @@
 """
 title: Universal Repo Agent
 author: usuari
-version: 2.5
+version: 2.6
 description: Pont a l'agent universal local. Suporta async, exec_shell amb confirmació i upload de ZIPs.
 """
 import json
 import os
+import time
 import urllib.request
 import urllib.error
 from typing import Optional
@@ -54,29 +55,8 @@ class Tools:
         except Exception as e:
             return {"error": str(e)}
 
-    # ---------- agent: execució de repos ----------
-    def executa_repo_async(self, input: str, dockerize: bool = False) -> str:
-        """
-        Inicia el desplegament d'un repo (URL GitHub o ruta local a un .zip/carpeta) en segon pla.
-        Retorna immediatament un job_id. Fes servir consulta_estat_job per veure el progrés.
-        :param input: URL del repo de GitHub o ruta local al host (ex: /home/usuari/...).
-        :param dockerize: Si True, intenta dockeritzar l'aplicació.
-        """
-        r = self._post("/run/async", {"input": input, "dockerize": dockerize}, timeout=20)
-        if "error" in r:
-            return f"Error: {r['error']}"
-        return (f"Feina iniciada amb job_id: {r.get('job_id')}\n"
-                f"Estat inicial: {r.get('status')}\n"
-                f"Consulta el progrés amb: consulta_estat_job('{r.get('job_id')}')")
-
-    def consulta_estat_job(self, job_id: str) -> str:
-        """
-        Consulta l'estat i la sortida acumulada d'una feina iniciada amb executa_repo_async.
-        :param job_id: identificador retornat per executa_repo_async.
-        """
-        r = self._get(f"/job/{job_id}", timeout=15)
-        if "error" in r:
-            return f"Error: {r['error']}"
+    # ---------- helpers de polling ----------
+    def _format_job_result(self, r: dict) -> str:
         status = r.get("status")
         if status == "failed" and r.get("error_reports"):
             rep = r["error_reports"][0]
@@ -95,11 +75,60 @@ class Tools:
         out = r.get("stdout") or r.get("output") or ""
         if len(out) > 4000:
             out = out[-4000:]
-        return (f"Estat: {status}\n"
-                f"Returncode: {r.get('returncode')}\n"
-                f"Iniciada: {r.get('started_at')}\n"
-                f"Acabada: {r.get('finished_at')}\n"
-                f"--- sortida (final) ---\n{out}")
+        emoji = "✅" if status == "done" else "❌"
+        return (f"{emoji} Estat: {status} | rc={r.get('returncode')}\n"
+                f"Iniciada: {r.get('started_at')} | Acabada: {r.get('finished_at')}\n"
+                f"--- sortida ---\n{out}")
+
+    def _wait_for_job(self, job_id: str, max_wait: int = 600, poll_interval: int = 5) -> str:
+        """Espera que un job acabi i retorna el resultat. Si supera max_wait, retorna l'últim estat."""
+        elapsed = 0
+        while elapsed < max_wait:
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+            r = self._get(f"/job/{job_id}", timeout=15)
+            if "error" in r:
+                return f"Error consultant el job: {r['error']}"
+            status = r.get("status")
+            if status in ("done", "failed"):
+                return self._format_job_result(r)
+        # Timeout — retorna l'últim estat conegut
+        r = self._get(f"/job/{job_id}", timeout=15)
+        out = r.get("stdout") or r.get("output") or ""
+        if len(out) > 2000:
+            out = out[-2000:]
+        return (f"⏳ Timeout ({max_wait}s) — el job {job_id} encara s'executa.\n"
+                f"Estat: {r.get('status')}\n"
+                f"--- sortida fins ara ---\n{out}\n\n"
+                f"Consulta el resultat final amb: consulta_estat_job('{job_id}')")
+
+    # ---------- agent: execució de repos ----------
+    def executa_repo_async(self, input: str, dockerize: bool = False) -> str:
+        """
+        Desplega un repo (URL GitHub o ruta local a un .zip/carpeta). Espera automàticament
+        fins que acabi i retorna el resultat final (fins a 10 minuts).
+        :param input: URL del repo de GitHub o ruta local al host (ex: /home/usuari/...).
+        :param dockerize: Si True, intenta dockeritzar l'aplicació.
+        """
+        r = self._post("/run/async", {"input": input, "dockerize": dockerize}, timeout=20)
+        if "error" in r:
+            return f"Error: {r['error']}"
+        job_id = r.get("job_id")
+        return self._wait_for_job(job_id, max_wait=600, poll_interval=5)
+
+    def consulta_estat_job(self, job_id: str) -> str:
+        """
+        Consulta l'estat d'un job. Si encara s'executa, espera fins que acabi (màx 10 min).
+        :param job_id: identificador retornat per executa_repo_async.
+        """
+        r = self._get(f"/job/{job_id}", timeout=15)
+        if "error" in r:
+            return f"Error: {r['error']}"
+        status = r.get("status")
+        if status in ("done", "failed"):
+            return self._format_job_result(r)
+        # Encara en curs — espera fins que acabi
+        return self._wait_for_job(job_id, max_wait=600, poll_interval=5)
 
     def segueix_progres_job(self, job_id: str) -> str:
         """
