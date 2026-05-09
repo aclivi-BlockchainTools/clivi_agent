@@ -335,6 +335,103 @@ async function upload(f){
 </script></body></html>"""
 
 # =============================================================================
+# WORKSPACE SERVICES — tracking de serveis start.sh (PIDs a .logs/*.pid)
+# =============================================================================
+
+def _workspace_services() -> Dict[str, Any]:
+    """Escaneja el workspace per serveis arrencats via start.sh (.logs/*.pid)."""
+    import os as _os
+    result: Dict[str, Any] = {}
+    ws = str(WORKSPACE)
+    try:
+        for repo_name in sorted(_os.listdir(ws)):
+            if repo_name.startswith('.') or repo_name.startswith('_'):
+                continue
+            logs_dir = _os.path.join(ws, repo_name, ".logs")
+            if not _os.path.isdir(logs_dir):
+                continue
+            services: Dict[str, Any] = {}
+            for pid_file in sorted(_os.listdir(logs_dir)):
+                if not pid_file.endswith(".pid"):
+                    continue
+                svc_name = pid_file[:-4]
+                try:
+                    with open(_os.path.join(logs_dir, pid_file)) as f:
+                        pid = int(f.read().strip())
+                    try:
+                        _os.kill(pid, 0)
+                        running = True
+                    except ProcessLookupError:
+                        running = False
+                    except PermissionError:
+                        running = True
+                    services[svc_name] = {"pid": pid, "running": running}
+                except Exception:
+                    pass
+            if services:
+                result[repo_name] = services
+    except Exception as e:
+        result["_error"] = str(e)
+    return result
+
+
+def _workspace_stop(repo: str) -> Dict[str, Any]:
+    """Atura serveis d'un repo (o tots) usant start.sh stop o matant PIDs."""
+    import os as _os
+    ws = str(WORKSPACE)
+    stopped: list = []
+    errors: list = []
+    repos_to_stop: list = []
+
+    if repo == "all":
+        try:
+            repos_to_stop = [
+                d for d in _os.listdir(ws)
+                if not d.startswith('.') and not d.startswith('_')
+                and _os.path.isdir(_os.path.join(ws, d, ".logs"))
+            ]
+        except Exception:
+            pass
+    else:
+        repos_to_stop = [repo]
+
+    for rname in repos_to_stop:
+        rpath = _os.path.join(ws, rname)
+        start_sh = _os.path.join(rpath, "start.sh")
+        if _os.path.isfile(start_sh):
+            try:
+                r = subprocess.run(["bash", start_sh, "stop"],
+                                   capture_output=True, text=True, timeout=30, cwd=rpath)
+                stopped.append(f"{rname}: OK via start.sh stop")
+                continue
+            except Exception as e:
+                errors.append(f"{rname}: start.sh stop error: {e}")
+
+        # Fallback: mata PIDs directament
+        logs_dir = _os.path.join(rpath, ".logs")
+        if _os.path.isdir(logs_dir):
+            for pid_file in _os.listdir(logs_dir):
+                if not pid_file.endswith(".pid"):
+                    continue
+                pid_path = _os.path.join(logs_dir, pid_file)
+                try:
+                    with open(pid_path) as f:
+                        pid = int(f.read().strip())
+                    import signal as _sig
+                    try:
+                        _os.kill(pid, _sig.SIGTERM)
+                        stopped.append(f"{rname}/{pid_file[:-4]}: SIGTERM PID={pid}")
+                    except ProcessLookupError:
+                        stopped.append(f"{rname}/{pid_file[:-4]}: ja mort")
+                    _os.remove(pid_path)
+                except Exception as e:
+                    errors.append(str(e))
+
+    return {"stopped": stopped, "errors": errors,
+            "ok": len(errors) == 0}
+
+
+# =============================================================================
 # ROUTER — dispatch per intent
 # =============================================================================
 
@@ -528,6 +625,8 @@ class Handler(BaseHTTPRequestHandler):
                              "public_url": _get_public_url(_PORT)})
         elif parsed.path == "/status":
             self._json(200, _run_agent(["--workspace", str(WORKSPACE), "--status"], timeout=30))
+        elif parsed.path == "/workspace/services":
+            self._json(200, _workspace_services())
         elif parsed.path == "/logs":
             q = parse_qs(parsed.query)
             repo = q.get("repo", [""])[0]
@@ -612,6 +711,9 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/stop":
             repo = str(body.get("repo", "all")).strip() or "all"
             self._json(200, _run_agent(["--workspace", str(WORKSPACE), "--stop", repo], timeout=30))
+        elif parsed.path == "/workspace/stop":
+            repo = str(body.get("repo", "all")).strip() or "all"
+            self._json(200, _workspace_stop(repo))
         elif parsed.path == "/refresh":
             repo = str(body.get("repo", "")).strip()
             if not repo:

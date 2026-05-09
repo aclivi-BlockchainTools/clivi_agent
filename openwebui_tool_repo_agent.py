@@ -203,19 +203,54 @@ class Tools:
 
     # ---------- agent: gestió de serveis ----------
     def estat_serveis(self) -> str:
-        """Mostra l'estat dels serveis registrats actualment."""
-        r = self._get("/status", timeout=15)
-        if "error" in r:
-            return f"Error: {r['error']}"
-        return json.dumps(r, indent=2, ensure_ascii=False)
+        """
+        Mostra tots els serveis i repos en execució al sistema.
+        Inclou serveis arrencats via start.sh (wavebox-mail, etc.) i via l'agent.
+        """
+        ws = self._get("/workspace/services", timeout=15)
+        ag = self._get("/status", timeout=15)
+
+        lines = []
+        # Serveis workspace (start.sh)
+        if ws and not ws.get("error") and not ws.get("_error"):
+            for repo, svcs in ws.items():
+                running = [s for s, info in svcs.items() if info.get("running")]
+                stopped = [s for s, info in svcs.items() if not info.get("running")]
+                status = "✅" if running else "❌"
+                pids = ", ".join(f"{s}(PID {svcs[s]['pid']})" for s in running)
+                lines.append(f"{status} {repo}: {pids or 'aturat'}")
+        # Serveis agent (legacy)
+        if isinstance(ag, dict) and ag.get("services"):
+            for repo, info in ag["services"].items():
+                if repo not in ws:
+                    st = info.get("status", "?")
+                    lines.append(f"{'✅' if st == 'RUNNING' else '❌'} {repo} (agent): {st}")
+
+        if not lines:
+            return "Cap servei actiu al workspace."
+        return "\n".join(lines)
 
     def atura_repo(self, repo: str = "all") -> str:
         """
         Atura un servei específic o tots ('all').
+        Funciona tant per serveis de l'agent com per serveis arrencats amb start.sh.
         :param repo: nom del repo o 'all'.
         """
-        r = self._post("/stop", {"repo": repo}, timeout=20)
-        return json.dumps(r, indent=2, ensure_ascii=False)
+        # Atura serveis workspace (start.sh)
+        r_ws = self._post("/workspace/stop", {"repo": repo}, timeout=30)
+        # Atura serveis agent (legacy)
+        r_ag = self._post("/stop", {"repo": repo}, timeout=20)
+
+        stopped = r_ws.get("stopped", []) + (r_ag.get("stopped", []) if isinstance(r_ag, dict) else [])
+        errors = r_ws.get("errors", [])
+        if not stopped and not errors:
+            return f"Cap servei '{repo}' actiu per aturar."
+        msg = ""
+        if stopped:
+            msg += "✅ Aturat:\n" + "\n".join(f"  - {s}" for s in stopped)
+        if errors:
+            msg += "\n❌ Errors:\n" + "\n".join(f"  - {e}" for e in errors)
+        return msg.strip()
 
     def refresca_repo(self, repo: str) -> str:
         """
