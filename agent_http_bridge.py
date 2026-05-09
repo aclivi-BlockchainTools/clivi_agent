@@ -227,7 +227,9 @@ _SHELL_TOKENS = {}
 _SHELL_LOCK = _threading.Lock()
 _SHELL_TOKEN_TTL = 120
 SHELL_BLOCKED = ("rm -rf /", "rm -rf ~", "mkfs", ":(){:|:&};:", "dd if=", "> /dev/sda",
-                 "shutdown", "reboot", "poweroff", "halt", "rm -rf $home")
+                 "shutdown", "reboot", "poweroff", "halt", "rm -rf $home",
+                 "docker stop open-webui", "docker rm open-webui", "docker kill open-webui",
+                 "docker stop open-webui-pipelines", "docker rm open-webui-pipelines")
 
 def _shell_register(cmd):
     import time as _t, uuid as _u
@@ -662,7 +664,7 @@ def _wizard_analyze(repo_url: str) -> Dict[str, Any]:
 
 def _is_rapid(answer: str) -> bool:
     a = answer.strip().lower()
-    return a in _RAPID_KEYWORDS or len(a) == 0
+    return a in _RAPID_KEYWORDS
 
 
 def _wizard_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
