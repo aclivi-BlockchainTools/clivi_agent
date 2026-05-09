@@ -839,13 +839,16 @@ def detect_env_vars_from_code(root: Path) -> Dict[str, str]:
     return env_vars
 
 
-def interactive_env_setup(root: Path, env_examples: List[Path], prefilled: Optional[Dict[str, str]] = None, detected_vars: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+def interactive_env_setup(root: Path, env_examples: List[Path], prefilled: Optional[Dict[str, str]] = None, detected_vars: Optional[Dict[str, str]] = None, non_interactive: bool = False) -> Dict[str, str]:
     prefilled = prefilled or {}
     detected_vars = detected_vars or {}
     all_values: Dict[str, str] = {}
     for example_path in env_examples:
         env_target = example_path.parent / ".env"
         if env_target.exists():
+            if non_interactive:
+                # En mode no-interactiu: no sobreescriure un .env existent
+                continue
             answer = input(f"{env_target} ja existeix. Sobreescriure? [s/N]: ").strip().lower()
             if answer not in {"s", "si", "y", "yes"}:
                 continue
@@ -870,6 +873,8 @@ def interactive_env_setup(root: Path, env_examples: List[Path], prefilled: Optio
                     value = prefilled[var]
                 elif default:
                     value = default
+                elif non_interactive:
+                    value = default or ""
                 else:
                     label = detected_vars.get(var) or vars_needed[var]
                     value = input(f"{var} ({label}) [{default or ''}]: ").strip() or default
@@ -2879,7 +2884,7 @@ def main() -> int:
         if not args.skip_env and not emergent:
             env_examples = find_env_examples(Path(analysis.root))
             if env_examples or analysis.env_vars_needed:
-                interactive_env_setup(Path(analysis.root), env_examples, prefilled=db_env_vars, detected_vars=analysis.env_vars_needed)
+                interactive_env_setup(Path(analysis.root), env_examples, prefilled=db_env_vars, detected_vars=analysis.env_vars_needed, non_interactive=args.non_interactive or args.approve_all)
 
         # Plan
         if emergent and args.dockerize:
