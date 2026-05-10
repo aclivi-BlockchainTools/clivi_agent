@@ -208,20 +208,26 @@ a entendre per què.
 **Fix:** Si el repo té manifests de paquet (package.json, setup.py, go.mod...) però
 0 serveis, ara diu: "ℹ️ El repo sembla una llibreria/package, no una aplicació executable."
 
+### ✅ [RESOLT 2026-05-10] Fix #12 — Bridge no veia serveis arrencats per l'agent
+**Causa-arrel exacta:** `_workspace_services()` i `_workspace_stop()` al bridge escanegen
+`.logs/*.pid`. Però `register_service()` de l'agent només guardava PIDs a `.agent_services.json`,
+sense crear `.logs/*.pid`. Conseqüència: serveis arrencats via `--execute` (streamlit, node...)
+eren invisibles al bridge. Només els serveis amb `start.sh` (wavebox-mail) creaven PID files.
+**Fix:**
+- `register_service()`: ara també crea `.logs/<step_id>.pid` amb el PID del procés.
+- `stop_services()`: ara neteja els `.logs/<step_id>.pid` en aturar serveis.
+El bridge ja no necessita canvis — els seus `_workspace_services`/`_workspace_stop`
+funcionen correctament amb els PID files creats per l'agent.
+
 ## Problemes coneguts pendents (PRIORITAT ALTA → BAIXA)
 
 ### 1. [MITJA] Repos-col·lecció generen 60+ passos
 Vegeu casos #07, #09, #10 a INFORME_BATERIA. Necessari un pre-classifier que detecti "és un index, no una app" i demani tria.
 
-### 2. [MITJA] Workspace duplicat: `universal-agent-workspace` vs `Projects/agent-workspace`
-Descobert 2026-05-10 durant test E2E. Hi ha 2 workspaces al sistema i els repos es dispersen
-entre tots dos. Cal triar-ne un d'oficial i migrar l'altre, o fer que el bridge i l'agent
-usin el mateix consistentment.
-
-### 3. [BAIXA] `diagnose_error_with_model` + `ask_model_for_repair` són dues crides desconnectades
+### 2. [BAIXA] `diagnose_error_with_model` + `ask_model_for_repair` són dues crides desconnectades
 El "debugger" actual no té memòria entre intents ni context del repo. Vegeu el patch `debugger_patch.py` que ja vam dissenyar (cal aplicar).
 
-### 4. [BAIXA] Smoke tests només per stack Emergent
+### 3. [BAIXA] Smoke tests només per stack Emergent
 `run_smoke_tests()` fa servir paths hardcoded `/api/`, `/api/health`. Cal generalitzar per stack detectat.
 
 ### bartolo-doctor.sh: 2 bugs menors (Bloc D, sessió futura)

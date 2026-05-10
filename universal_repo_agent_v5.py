@@ -1905,6 +1905,13 @@ def register_service(workspace: Path, repo_name: str, step_id: str, cwd: str, co
         "started_at": time.time(),
     })
     save_services_registry(workspace, data)
+    # Also create .logs/<step_id>.pid for bridge visibility
+    if pid:
+        repo_path = Path(cwd)
+        logs_dir = repo_path / ".logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        pid_file = logs_dir / f"{step_id}.pid"
+        pid_file.write_text(str(pid))
 
 
 def stop_services(workspace: Path, repo_name: str = "all") -> None:
@@ -1932,6 +1939,13 @@ def stop_services(workspace: Path, repo_name: str = "all") -> None:
                 pass
             except Exception as e:
                 warn(f"No s'ha pogut aturar PID {pid}: {e}")
+            # Clean up .logs/<step_id>.pid file
+            if svc.get("step_id") and svc.get("cwd"):
+                pid_file = Path(svc["cwd"]) / ".logs" / f"{svc['step_id']}.pid"
+                try:
+                    pid_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
         if name in data:
             del data[name]
     save_services_registry(workspace, data)
