@@ -10,6 +10,8 @@ Inclou:
 - 🔑 **Caché de secrets** (`EMERGENT_LLM_KEY`, `OPENAI_API_KEY`, `STRIPE_*`…) a `~/.universal-agent/secrets.json`
 - 🧪 **Smoke tests automàtics** després d'arrencar (HTTP + pytest)
 - 🎨 **Dashboard web** (`dashboard.py`) per veure i controlar repos via navegador
+- 🧭 **Router d'intencions** (`bartolo_router.py`) L1 (regex) + L2 (LLM petit) per classificar peticions en llenguatge natural
+- 🔧 **Debugger intel·ligent** (`agents/debugger.py`) amb KB persistent de reparacions + fallback a Anthropic
 
 ---
 
@@ -22,9 +24,13 @@ Inclou:
 | `OPENWEBUI_SETUP.md` | Guia d'integració amb OpenWebUI (routing automàtic) |
 | `setup_ubuntu.sh` | Script d'instal·lació de totes les dependències a Ubuntu |
 | `universal_repo_agent_v5.py` | L'agent CLI |
+| `agent_http_bridge.py` | Bridge HTTP (API REST al :9090) amb wizard, router dispatch, jobs async |
+| `bartolo_router.py` | Classificador d'intencions L1 (regex) + L2 (LLM) — 8 intents, 0ms L1 |
+| `agents/debugger.py` | Debugger intel·ligent amb KB de reparacions + Anthropic fallback |
 | `dashboard.py` | Dashboard web a `http://localhost:9999` (zero dependències) |
+| `bartolo_prompts.md` | Catàleg de prompts naturals que entén Bartolo |
+| `bench.sh` | Bateria de proves automatitzada (10 repos) |
 | `README.md` | Aquesta guia |
-| `INFORME_BATERIA.md` | Informe de la bateria de proves amb 10 repos públics |
 
 ---
 

@@ -123,7 +123,22 @@ Confirma amb el token <token>
 | `executa_comanda_shell_confirmada(token)` | Pas 2: executa |
 | `url_pujada_de_zips()` | URL del formulari d'upload |
 
-## 8. Tips
+## 8. Intents del router (llenguatge natural)
+
+Aquests intents es classifiquen via L1 (regex, 0ms) o L2 (LLM petit, ~2s):
+
+| Intent | Exemples |
+|---|---|
+| `temps_data` | "quina hora és", "quin dia som" |
+| `info_sistema` | "docker ps", "espai lliure", "quants containers", "ports oberts" |
+| `munta_repo` | "munta https://github.com/...", "clona el repo..." |
+| `start_servei` | "arrenca streamlit-example", "engega el backend" |
+| `atura_repo` | "atura streamlit-example", "para el backend", "stop tot" |
+| `estat_workspace` | "quins serveis estan arrencats", "estat dels serveis" |
+| `gestio_docker` | "actualitza open-webui", "docker pull..." |
+| `cerca_web` | "cerca a internet..." (redirigeix a tool web_search) |
+
+## 9. Tips
 
 - **Si Bartolo respon coses estranyes** (paràfrasis o "no tinc accés"): mira sempre el modal de la tool clicant el chip a sota la resposta. Allà està la veritat.
 - **Comandes destructives** (`rm -rf /`, `mkfs`, `dd`, ...) es bloquegen automàticament al bridge.

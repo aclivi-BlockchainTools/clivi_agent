@@ -46,6 +46,11 @@ _L1_RULES = [
      "start_servei"),
 
     (re.compile(
+        r'\b(atura|aturar|para|parar|stop|apaga|apagar|mata|matar|'
+        r'frena|deten|detener)\b', re.I),
+     "atura_repo"),
+
+    (re.compile(
         r'\b(actualitza open-webui|actualitza el container|'
         r'docker pull|update container|update open-webui|'
         r'upgrade open-webui)\b', re.I),
@@ -118,7 +123,7 @@ def extract_cmd_l1(text: str) -> Optional[str]:
 _L2_MODEL_PREFERENCES = ["qwen2.5:7b", "qwen2.5:14b"]
 _L2_TIMEOUT = 6  # qwen2.5:7b classification takes ~1-3s; 6s gives headroom without blocking
 _L2_INTENTS = {"temps_data", "info_sistema", "munta_repo", "gestio_docker",
-               "start_servei", "estat_workspace",
+               "start_servei", "atura_repo", "estat_workspace",
                "cerca_web", "conversa"}
 
 _L2_PROMPT_TMPL = """\
@@ -130,13 +135,14 @@ Categories:
 - info_sistema: estat del sistema, docker, processos, ports, versions, logs, espai disc
 - munta_repo: muntar, clonar, instal·lar, desplegar un repositori GitHub/GitLab NOU (requereix URL)
 - start_servei: arrencar, arrancar, reiniciar, engegar un servei/repo JA EXISTENT pel nom (sense URL)
+- atura_repo: aturar, parar, apagar, matar un servei/repo pel nom
 - gestio_docker: actualitzar o gestionar containers Docker existents
 - cerca_web: cerques a internet, informació externa
 - conversa: qualsevol altra cosa (conversa general, codi, explicacions)
 
 Per a info_sistema, extreu també la comanda shell adequada.
 Per a munta_repo, extreu la URL del repo si n'hi ha.
-Per a start_servei, extreu el nom del servei/repo.
+Per a start_servei i atura_repo, extreu el nom del servei/repo.
 
 Format de resposta:
 {"intent": "categoria", "cmd": "comanda o null", "repo_url": "url o null", "repo_name": "nom o null"}
@@ -210,7 +216,8 @@ def classify_l2(text: str,
 
 _URL_RE = re.compile(r'https?://\S+|(?:github|gitlab|bitbucket)\.com/\S+', re.I)
 _REPO_NAME_RE = re.compile(
-    r'\b(?:arrenca|arrancar|arrencar|reinicia|reiniciar|engega|restart|start)\s+'
+    r'\b(?:arrenca|arrancar|arrencar|reinicia|reiniciar|engega|restart|start|'
+    r'atura|aturar|para|parar|stop|apaga|apagar|mata|matar|frena|deten|detener)\s+'
     r'(?:el\s+|la\s+|els?\s+|un\s+)?([\w][\w-]+)\b', re.I)
 
 
@@ -233,7 +240,7 @@ def classify(text: str,
         if intent_l1 == "munta_repo":
             url_match = _URL_RE.search(text)
             repo_url = url_match.group(0).rstrip(".,);:'\"") if url_match else None
-        if intent_l1 == "start_servei":
+        if intent_l1 in ("start_servei", "atura_repo"):
             m = _REPO_NAME_RE.search(text)
             repo_name = m.group(1) if m else None
         return {"intent": intent_l1, "cmd": cmd, "repo_url": repo_url,

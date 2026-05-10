@@ -515,7 +515,54 @@ def _router_dispatch(text: str, ollama_url: str = "http://localhost:11434") -> D
             return {"intent": intent, "source": source,
                     "error": (f"El servei '{repo_name}' no es troba al workspace. "
                               f"Usa 'munta URL' per clonar-lo primer.")}
-        result = _run_agent(["--workspace", ws, "--refresh", found], timeout=120)
+        repo_path = _os.path.join(ws, found)
+        # Primer atura el servei si estava corrent
+        _workspace_stop(found)
+        # Després re-executa el pla complet (anàlisi + install + run)
+        result = _run_agent([
+            "--workspace", ws,
+            "--input", repo_path,
+            "--execute",
+            "--approve-all",
+            "--non-interactive",
+            "--no-readme",
+            "--no-model-refine",
+        ], timeout=300)
+        return {"intent": intent, "source": source, "repo": found, **result}
+
+    if intent == "atura_repo":
+        import os as _os
+        repo_name = classified.get("repo_name") or ""
+        if not repo_name:
+            m = re.search(
+                r'\b(?:atura|aturar|para|parar|stop|apaga|apagar|mata|matar|frena|deten|detener)\s+'
+                r'(?:el\s+|la\s+|els?\s+|un\s+)?([\w][\w-]+)\b', text, re.I)
+            repo_name = m.group(1) if m else ""
+        if not repo_name:
+            return {"intent": intent, "source": source,
+                    "error": "No he pogut identificar el nom del servei. Quin repo vols aturar?"}
+        # Cas especial: "atura tots els serveis" o "atura tot"
+        if repo_name.lower() in ("tot", "tots", "all", "tot el workspace"):
+            result = _workspace_stop("all")
+            return {"intent": intent, "source": source,
+                    "result": f"Aturats: {len(result.get('stopped', []))} serveis. "
+                    f"Errors: {len(result.get('errors', []))}",
+                    **result}
+        ws = str(WORKSPACE)
+        found = None
+        try:
+            for d in _os.listdir(ws):
+                if d.startswith('.') or d.startswith('_'):
+                    continue
+                if d.lower() == repo_name.lower() or repo_name.lower() in d.lower():
+                    found = d
+                    break
+        except Exception:
+            pass
+        if not found:
+            return {"intent": intent, "source": source,
+                    "error": f"El servei '{repo_name}' no es troba al workspace."}
+        result = _workspace_stop(found)
         return {"intent": intent, "source": source, "repo": found, **result}
 
     if intent == "munta_repo":
@@ -893,7 +940,9 @@ def _wizard_analyze(repo_url: str) -> Dict[str, Any]:
                     stack_parts.append("Node.js")
             except Exception:
                 stack_parts.append("Node.js")
-        if (root / "requirements.txt").exists() or list(root.glob("*.py")):
+        if (root / "requirements.txt").exists() or list(root.glob("*.py")) or \
+           (root / "setup.py").exists() or (root / "setup.cfg").exists() or \
+           (root / "pyproject.toml").exists():
             txt = combined.lower()
             if "fastapi" in txt:
                 stack_parts.append("FastAPI")

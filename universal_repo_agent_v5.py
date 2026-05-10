@@ -105,6 +105,8 @@ SYSTEM_DEPS: Dict[str, Dict[str, str]] = {
     "docker": {"check": "docker --version", "install": "https://docs.docker.com/engine/install/"},
     "make": {"check": "make --version", "install": "sudo apt-get install -y build-essential"},
     "go": {"check": "go version", "install": "sudo apt-get install -y golang-go"},
+    "pnpm": {"check": "pnpm --version", "install": "npm install -g pnpm"},
+    "yarn": {"check": "yarn --version", "install": "npm install -g yarn"},
     "cargo": {"check": "cargo --version", "install": "curl https://sh.rustup.rs -sSf | sh"},
     "ruby": {"check": "ruby --version", "install": "sudo apt-get install -y ruby"},
     "bundle": {"check": "bundle --version", "install": "gem install bundler"},
@@ -1992,6 +1994,9 @@ def analyze_repo(root: Path, model: str = DEFAULT_MODEL, extract_readme: bool = 
     needed: List[str] = ["git"]
     for svc in analysis.services:
         needed.extend(req_map.get(svc.service_type, []))
+        pm = getattr(svc, "package_manager", None)
+        if pm and pm in SYSTEM_DEPS:
+            needed.append(pm)
     if analysis.likely_db_needed:
         needed.append("docker")
     analysis.host_requirements = sorted(set(needed))
@@ -2272,7 +2277,14 @@ def build_deterministic_plan(analysis: RepoAnalysis) -> ExecutionPlan:
             if preferred:
                 steps.append(CommandStep(id=f"make-{slugify(svc.name)}-{preferred}", title=f"make {preferred} — {svc.name}", cwd=svc.path, command=f"make {preferred}", expected_outcome=f"make {preferred} completat", category="run", critical=False))
     if not steps:
-        notes.append("⚠️  No s'ha pogut derivar cap pla d'execució automàticament.")
+        manifests = analysis.top_level_manifests or []
+        lib_manifests = [m for m in manifests if m in ("package.json", "setup.py", "setup.cfg", "pyproject.toml",
+                        "go.mod", "Cargo.toml", "Gemfile", "composer.json", "pom.xml")]
+        if lib_manifests and not analysis.services:
+            notes.append(f"ℹ️  El repo sembla una llibreria/package ({', '.join(lib_manifests)}), no una aplicació executable."
+                         f"\n   Si és una app, cal un manifest de servei addicional (Dockerfile, Procfile, start.sh...).")
+        else:
+            notes.append("⚠️  No s'ha pogut derivar cap pla d'execució automàticament.")
     return ExecutionPlan(summary="Pla generat automàticament a partir dels manifests del repositori.", steps=steps, notes=notes)
 
 

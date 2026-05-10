@@ -24,9 +24,9 @@ L'usuari final coneix el sistema com **"Bartolo"** (el nom del model d'OpenWebUI
 
 | Fitxer | Què fa | Línies |
 |---|---|---|
-| `universal_repo_agent_v5.py` | Agent CLI, cor del sistema | 2786 |
-| `agent_http_bridge.py` | REST API al port 9090, jobs async, shell exec amb token, upload ZIP | 406 |
-| `openwebui_tool_repo_agent.py` | Tool per OpenWebUI (v2.3, 10 funcions) | 174 |
+| `universal_repo_agent_v5.py` | Agent CLI, cor del sistema | 2960 |
+| `agent_http_bridge.py` | REST API al port 9090, jobs async, shell exec amb token, upload ZIP, wizard, router dispatch | 1330 |
+| `openwebui_tool_repo_agent.py` | Tool per OpenWebUI (v2.3, 10 funcions) | 396 |
 | `openwebui_tool_web_search.py` | Tool DuckDuckGo per cerques | 112 |
 | `dashboard.py` | UI web :9999 | 254 |
 | `bench.sh` | Bateria de proves automatitzada (10 repos) | 83 |
@@ -166,30 +166,62 @@ fa `bash start.sh stop` + `stop_services()` + `bash start.sh` (stop + restart co
 Si no té `start.sh` tampoc, retorna missatge d'error informatiu en lloc del missatge confús
 sobre `backend/` + `frontend/`.
 
-### ✅ [RESOLT 2026-05-06] Fix #6 — wavebox-mail start.sh: crash loop per BD no preparada
-**Causa-arrel exacta:** `start.sh` llançava `docker compose up -d ... &` en background
-(amb `setsid nohup`) i immediatament executava `prisma migrate`. Com que:
-(a) `docker compose` (plugin v2) no estava instal·lat al sistema,
-(b) `pg_isready` tampoc estava instal·lat (no hi ha `postgresql-client`),
-el check de BD semblava OK (falsos negatius), Prisma deia "no migrations" sense crear
-taules, el backend arrencava i petava en bucle (nodemon restart loop) → pressió CPU/RAM
-→ sistema lentíssim → l'usuari reiniciava manualment.
-**Fix** a `wavebox-mail/start.sh`:
-1. Substituït `docker compose` per `docker run` directe com a fallback (crea contenidors
-   `wavebox-postgres` i `wavebox-redis` amb `docker run`, o els reinicia si ja existeixen).
-2. `DOCKER_STARTED` flag: el wait loop de PostgreSQL només s'executa si Docker va arrencar
-   alguna cosa — no espera 30s en va si Docker no estava disponible.
-3. Substituït `pg_isready` per `nc -z localhost 5432` (netcat sempre disponible a Ubuntu).
+### ✅ [RESOLT 2026-05-10] Fix #7 — `atura_repo` sense regla L1 ni handler L3
+**Causa-arrel exacta:** Ni `bartolo_router.py` ni `agent_http_bridge.py` tenien cap
+regla per classificar o gestionar peticions d'aturar serveis ("atura X", "para X",
+"stop X"). Les peticions queien a L2 com a "conversa". El `POST /stop` existia com a
+endpoint però el router no hi arribava.
+**Fix:**
+- `bartolo_router.py`: Afegida regla L1 amb 9 verbs (atura, para, stop, apaga, mata, frena...),
+  `atura_repo` a `_L2_INTENTS` i prompt L2, `_REPO_NAME_RE` actualitzada.
+- `agent_http_bridge.py`: Handler L3 complet amb cerca de repo al workspace, suport per
+  "atura tot"/"atura tots" → `_workspace_stop("all")`.
+
+### ✅ [RESOLT 2026-05-10] Fix #8 — `start_servei` fallava amb repos no-Emergent
+**Causa-arrel exacta:** El handler `start_servei` cridava `_run_agent(["--refresh", ...])`
+que internament usa `refresh_repo_config()`. Aquesta funció només suporta stacks Emergent
+o repos amb `start.sh`. Repos com streamlit-example (muntats per Bartolo) no tenen cap
+dels dos → error "no és Emergent ni té start.sh".
+**Fix:** El handler ara primer atura el servei (`_workspace_stop`) i després re-executa
+el pla complet via `--input <path> --execute --approve-all --non-interactive --no-readme
+--no-model-refine`. Timeout pujat a 300s.
+
+### ✅ [RESOLT 2026-05-10] Fix #9 — Flask detectat com "Desconegut" al wizard
+**Causa-arrel exacta:** `_analyze_repo_quick()` al bridge només mirava `requirements.txt`
+i `*.py` per detectar Python. Flask (i molts paquets Python) usen `setup.py`, `setup.cfg`
+o `pyproject.toml` sense `requirements.txt` al root.
+**Fix:** Afegits `setup.py`, `setup.cfg`, `pyproject.toml` a la detecció Python del wizard.
+
+### ✅ [RESOLT 2026-05-10] Fix #10 — `pnpm`/`yarn` no es comprovaven al sistema
+**Causa-arrel exacta:** `SYSTEM_DEPS` no incloïa `pnpm` ni `yarn`. Quan `detect_node_service`
+detectava un `pnpm-lock.yaml` i generava `pnpm install` com a pas, el sistema no verificava
+si `pnpm` estava instal·lat → error 127 en executar.
+**Fix:**
+- `pnpm` i `yarn` afegits a `SYSTEM_DEPS` amb check (`pnpm --version`) i install hint.
+- `analyze_repo()`: ara afegeix el `package_manager` del servei a `host_requirements`
+  (ex: si el servei usa pnpm, afegeix `pnpm` als requisits del host).
+
+### ✅ [RESOLT 2026-05-10] Fix #11 — Missatge genèric per repos llibreria
+**Causa-arrel exacta:** Quan un repo era una llibreria (0 serveis), el missatge era
+"⚠️ No s'ha pogut derivar cap pla d'execució automàticament", que no ajudava l'usuari
+a entendre per què.
+**Fix:** Si el repo té manifests de paquet (package.json, setup.py, go.mod...) però
+0 serveis, ara diu: "ℹ️ El repo sembla una llibreria/package, no una aplicació executable."
 
 ## Problemes coneguts pendents (PRIORITAT ALTA → BAIXA)
 
 ### 1. [MITJA] Repos-col·lecció generen 60+ passos
 Vegeu casos #07, #09, #10 a INFORME_BATERIA. Necessari un pre-classifier que detecti "és un index, no una app" i demani tria.
 
-### 2. [BAIXA] `diagnose_error_with_model` + `ask_model_for_repair` són dues crides desconnectades
+### 2. [MITJA] Workspace duplicat: `universal-agent-workspace` vs `Projects/agent-workspace`
+Descobert 2026-05-10 durant test E2E. Hi ha 2 workspaces al sistema i els repos es dispersen
+entre tots dos. Cal triar-ne un d'oficial i migrar l'altre, o fer que el bridge i l'agent
+usin el mateix consistentment.
+
+### 3. [BAIXA] `diagnose_error_with_model` + `ask_model_for_repair` són dues crides desconnectades
 El "debugger" actual no té memòria entre intents ni context del repo. Vegeu el patch `debugger_patch.py` que ja vam dissenyar (cal aplicar).
 
-### 3. [BAIXA] Smoke tests només per stack Emergent
+### 4. [BAIXA] Smoke tests només per stack Emergent
 `run_smoke_tests()` fa servir paths hardcoded `/api/`, `/api/health`. Cal generalitzar per stack detectat.
 
 ### bartolo-doctor.sh: 2 bugs menors (Bloc D, sessió futura)
