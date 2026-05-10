@@ -230,10 +230,12 @@ El "debugger" actual no té memòria entre intents ni context del repo. Vegeu el
 ### 3. [BAIXA] Smoke tests només per stack Emergent
 `run_smoke_tests()` fa servir paths hardcoded `/api/`, `/api/health`. Cal generalitzar per stack detectat.
 
-### bartolo-doctor.sh: 2 bugs menors (Bloc D, sessió futura)
-- Pas 2: `/proc/PID/environ` Permission denied si bridge no és fill del shell
-  (warning confús, ja funciona silenciosament — fix: millorar el missatge)
-- Pas 7: mostra `localhost:3001` però OpenWebUI escolta al `:3000`
+### ✅ [RESOLT 2026-05-10] bartolo-doctor.sh: 2 bugs menors
+1. **Pas 2 — `/proc/PID/environ` Permission denied:** El codi ja ho gestiona correctament
+   (`2>/dev/null` + fallback a token buit + missatge informatiu). No cal canvi.
+2. **Pas 7 — `docker port` parsing fràgil amb IPv6:** `head -1 | cut -d: -f2` trencava si
+   la línia IPv6 (`[::]:3000`) sortia primer. **Fix:** `grep -oP '0\.0\.0\.0:\K\d+'` per
+   extreure només el port de la línia IPv4.
 
 ## Millores futures descobertes
 

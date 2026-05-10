@@ -421,7 +421,7 @@ fi
 
 # 7. Tool (manual)
 header "7. Tool d'OpenWebUI (verificació manual)"
-OWU_PORT=$(docker port "$OPENWEBUI_CONTAINER" 8080 2>/dev/null | head -1 | cut -d: -f2)
+OWU_PORT=$(docker port "$OPENWEBUI_CONTAINER" 8080 2>/dev/null | grep -oP '0\.0\.0\.0:\K\d+' | head -1)
 OWU_PORT="${OWU_PORT:-3000}"
 log "  ${GRAY}A http://localhost:${OWU_PORT}:${NC}"
 log "  ${GRAY}1. Settings → Workspace → Tools → Universal Repo Agent${NC}"
