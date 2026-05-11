@@ -661,7 +661,9 @@ def maybe_background_command(command: str, log_rel: str = ".agent_last_run.log")
     markers = ["npm start", "npm run dev", "yarn start", "yarn dev", "pnpm dev",
                "uvicorn ", "flask ", "python manage.py runserver", "streamlit run",
                "rails server", "php artisan serve", "go run ", "cargo run",
-               "docker compose up", "docker-compose up"]
+               "docker compose up", "docker-compose up",
+               "deno run", "deno task", "dotnet run", "dotnet watch",
+               "mix phx.server", "mix run", "bundle exec"]
     if any(marker in command for marker in markers):
         # Evita re-wrapping si ja ve amb nohup/&
         if "nohup" in command or command.rstrip().endswith("&"):
@@ -1477,12 +1479,28 @@ def detect_deno_service(path: Path) -> Optional[ServiceInfo]:
     try:
         if has_manifest:
             text = read_text(deno_json if deno_json.exists() else deno_jsonc)
+        else:
+            # Sense manifest: escaneja .ts/.js per trobar el port real
+            for f in ts_files[:5]:
+                try:
+                    text = f.read_text(errors="ignore")[:3000]
+                    if re.search(r'\b(?:PORT|port|listen)\s*[:=]\s*\d{4,5}', text):
+                        break
+                except Exception:
+                    pass
     except Exception:
         pass
     ports = detect_ports_from_text(text)
     run_url = f"http://localhost:{ports[0]}" if ports else "http://localhost:8001"
+    # Si no té manifest, busca el millor entry point per als hints
+    entry_hints = ["deno run -A main.ts", "deno task start"]
+    if not has_manifest:
+        for candidate in ("server.ts", "main.ts", "index.ts", "app.ts", "mod.ts"):
+            if (path / candidate).exists():
+                entry_hints[0] = f"deno run -A {candidate}"
+                break
     return ServiceInfo(name=path.name, path=str(path), service_type="deno", framework="deno",
-                       entry_hints=["deno run -A main.ts", "deno task start"],
+                       entry_hints=entry_hints,
                        manifests=manifests, confidence=0.65 if has_manifest else 0.4,
                        run_url=run_url)
 
@@ -2951,10 +2969,8 @@ def choose_service_verify(step_command: str, svc: ServiceInfo) -> Tuple[str, Opt
         if parsed.port:
             free_port = find_free_port(parsed.port)
             if free_port != parsed.port:
-                if svc.service_type == "node":
-                    command = f"PORT={free_port} {step_command}"
-                elif svc.service_type == "python":
-                    # Handle multiple port flag variants used by Python web frameworks
+                st = svc.service_type
+                if st == "python":
                     new_cmd = step_command
                     # Streamlit: --server.port NNN
                     new_cmd = re.sub(r"--server\.port[=\s]+\d+", f"--server.port {free_port}", new_cmd)
@@ -2963,10 +2979,37 @@ def choose_service_verify(step_command: str, svc: ServiceInfo) -> Tuple[str, Opt
                     # Gunicorn / generic: --bind HOST:NNN or -b HOST:NNN
                     new_cmd = re.sub(r"(--bind|-b)[=\s]+([^\s:]+):\d+", lambda m: f"{m.group(1)} {m.group(2)}:{free_port}", new_cmd)
                     if new_cmd == step_command:
-                        # No known flag matched: prepend PORT env var as fallback
                         command = f"PORT={free_port} {step_command}"
                     else:
                         command = new_cmd
+                elif st == "php":
+                    # php artisan serve --port NNN / php -S HOST:NNN
+                    new_cmd = re.sub(r"(--port[=\s]+)\d+", f"\\g<1>{free_port}", step_command)
+                    new_cmd = re.sub(r"(-S[=\s]+[\w.]+):\d+", f"\\g<1>:{free_port}", new_cmd)
+                    command = new_cmd if new_cmd != step_command else f"PORT={free_port} {step_command}"
+                elif st == "ruby":
+                    # rails server -p NNN / bundle exec ruby app.rb -p NNN
+                    new_cmd = re.sub(r"(--port|-p)[=\s]+\d+", f"\\g<1> {free_port}", step_command)
+                    command = new_cmd if new_cmd != step_command else f"PORT={free_port} {step_command}"
+                elif st == "elixir":
+                    # mix phx.server uses PORT env; mix run --no-halt uses PORT env
+                    command = f"PORT={free_port} {step_command}"
+                elif st == "go":
+                    # Go apps typically read PORT or use -port flag
+                    new_cmd = re.sub(r"(--port|-p)[=\s]+\d+", f"\\g<1> {free_port}", step_command)
+                    command = new_cmd if new_cmd != step_command else f"PORT={free_port} {step_command}"
+                elif st == "java":
+                    # Spring Boot: --server.port=NNN / Gradle: -Dserver.port=NNN
+                    new_cmd = re.sub(r"--server\.port[=\s]+\d+", f"--server.port={free_port}", step_command)
+                    new_cmd = re.sub(r"-Dserver\.port=\d+", f"-Dserver.port={free_port}", new_cmd)
+                    command = new_cmd if new_cmd != step_command else f"PORT={free_port} {step_command}"
+                elif st == "dotnet":
+                    # ASP.NET: --urls http://HOST:NNN
+                    new_cmd = re.sub(r"--urls[=\s]+https?://[^:]+:\d+", f"--urls http://localhost:{free_port}", step_command)
+                    command = new_cmd if new_cmd != step_command else f"ASPNETCORE_URLS=http://localhost:{free_port} {step_command}"
+                else:
+                    # node, deno, rust, make, docker, i qualsevol altre: PORT env var genèrica
+                    command = f"PORT={free_port} {step_command}"
                 svc.run_url = f"{parsed.scheme}://{parsed.hostname}:{free_port}"
             verify_url = svc.run_url
             verify_port = free_port
