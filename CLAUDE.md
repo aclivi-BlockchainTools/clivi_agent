@@ -16,7 +16,7 @@ L'usuari final coneix el sistema com **"Bartolo"** (el nom del model d'OpenWebUI
 
 - **OpenWebUI**: xat amb Qwen2.5-coder:14b via Ollama, function calling nadiu
 - **Bridge HTTP** (`agent_http_bridge.py`): exposa l'agent com REST API al port 9090
-- **Agent CLI** (`universal_repo_agent_v5.py`): el cervell — 2786 línies, validator + planner + executor
+- **Agent CLI** (`universal_repo_agent_v5.py`): el cervell — 3892 línies, validator + planner + executor + preflight + plan B + success KB + 12 detectors
 - **Dashboard** (`dashboard.py`): UI web a 9999, sense dependències extra
 - **Tool OpenWebUI** (`openwebui_tool_repo_agent.py`): client Python pur (urllib) que el container OpenWebUI carrega
 
@@ -24,12 +24,17 @@ L'usuari final coneix el sistema com **"Bartolo"** (el nom del model d'OpenWebUI
 
 | Fitxer | Què fa | Línies |
 |---|---|---|
-| `universal_repo_agent_v5.py` | Agent CLI, cor del sistema | 2960 |
-| `agent_http_bridge.py` | REST API al port 9090, jobs async, shell exec amb token, upload ZIP, wizard, router dispatch | 1330 |
-| `openwebui_tool_repo_agent.py` | Tool per OpenWebUI (v2.3, 10 funcions) | 396 |
+| `universal_repo_agent_v5.py` | Agent CLI, cor del sistema | 3892 |
+| `agent_http_bridge.py` | REST API al port 9090, jobs async, shell exec amb token, upload ZIP, wizard, router dispatch | 1408 |
+| `openwebui_tool_repo_agent.py` | Tool per OpenWebUI (v2.3, 10 funcions) | 403 |
 | `openwebui_tool_web_search.py` | Tool DuckDuckGo per cerques | 112 |
+| `bartolo_router.py` | Classificador d'intencions L1 (regex) + L2 (LLM) — 8 intents | 252 |
+| `bartolo_init.py` | CLI interactiva per muntar repos sense flags (reutilitza l'agent) | 168 |
+| `agents/success_kb.py` | Registre de plans que han funcionat per stack (KB d'èxits) | 83 |
+| `agents/debugger.py` | Debugger intel·ligent amb KB de reparacions + Anthropic fallback | — |
 | `dashboard.py` | UI web :9999 | 254 |
 | `bench.sh` | Bateria de proves automatitzada (10 repos) | 83 |
+| `stress_test.sh` | Bateria d'estrès amb repos complexos (7 repos, detecció) | 85 |
 | `setup_ubuntu.sh` | Instal·lador Node/Docker/Ollama/qwen2.5-coder:14b | 190 |
 | `bartolo_prompts.md` | Catàleg de prompts naturals que entén Bartolo | 131 |
 | `INFORME_BATERIA.md` | Resultats de la bateria amb taxes d'èxit per stack | 101 |
@@ -219,16 +224,186 @@ eren invisibles al bridge. Només els serveis amb `start.sh` (wavebox-mail) crea
 El bridge ja no necessita canvis — els seus `_workspace_services`/`_workspace_stop`
 funcionen correctament amb els PID files creats per l'agent.
 
+### ✅ [RESOLT 2026-05-10] Bloc A — Millores de fiabilitat (A1, A2, A3)
+
+**A1 — Pre-flight check abans de clonar:**
+Nova funció `preflight_check()` a l'agent que comprova abans de generar el pla:
+- Dependències del sistema (`SYSTEM_DEPS`) — avisa quines cal instal·lar
+- Espai lliure al disc — avorta si < 500 MB
+- Conflictes de ports — detecta si els ports del servei ja estan ocupats
+Retorna `bool`: `True` = continuar, `False` = cancel·lar. Integrada a `main()`.
+
+**A2 — Plan B per step fallit:**
+Nou diccionari `_FALLBACK_MAP` amb alternatives predefinides per errors comuns:
+- `pnpm install` → `npm install`, `yarn install`
+- `yarn install` → `npm install`
+- `go mod tidy` / `go build` → `go env` (diagnòstic)
+- `pip install -r requirements.txt` → `pip install --break-system-packages -r requirements.txt`
+Funció `_get_fallbacks()` busca coincidències exactes, per prefix, o suggereix
+alternatives si el returncode és 127 (command not found).
+Integrat a `execute_plan()`: prova fallbacks ABANS d'escalar al debugger LLM.
+
+**A3 — Registre d'èxits per stack (`agents/success_kb.py`):**
+Nou mòdul que guarda plans que han funcionat a `~/.universal-agent/success_kb.json`.
+- `lookup_plan(service_type, manifests)`: busca un pla validat per a un stack concret
+- `record_success(service_type, manifests, steps)`: guarda un pla que ha funcionat
+- Claus tipus `node+npm`, `python+streamlit+pip`, etc.
+Integrat a `build_deterministic_plan()` (consulta primer) i `execute_plan()` (guarda si OK).
+
+### ✅ [RESOLT 2026-05-10] C1 — `bartolo init` CLI interactiu
+
+Nou fitxer `bartolo_init.py` (168 línies). Guia interactiva per muntar repos sense flags:
+1. Demana URL/Path del repo
+2. Demana directori de treball (default `~/universal-agent-workspace`)
+3. Adquireix el repo (clona/descomprimeix)
+4. Analitza el stack
+5. Pre-flight check (deps, disk, ports)
+6. Genera i mostra el pla
+7. Demana confirmació
+8. Executa i mostra resultats
+Reutilitza `acquire_input()`, `analyze_repo()`, `preflight_check()`, `build_deterministic_plan()`,
+`execute_plan()` de l'agent. Ideal per usuaris que no volen recordar flags.
+
+### ✅ [RESOLT 2026-05-10] Bloc B — Info de connexió a BD (B1, B2, B3, B4)
+
+**B1 — `print_final_summary()` millorat:**
+Mostra estructuradament per cada BD: contenidor Docker, host:port, usuari/password,
+nom de la BD, URL de connexió, comanda `docker exec` per connectar, i CLI local
+(`psql`, `mongosh`, `redis-cli`) si estan instal·lades.
+
+**B2 — Detecció de BD al wizard del bridge:**
+`_wizard_analyze()` escaneja vars d'entorn de BD (`MONGO_URL`, `DATABASE_URL`,
+`POSTGRES_*`, `MYSQL_*`, `REDIS_URL`). Retorna `db_hints` al diccionari d'anàlisi.
+CONFIRM_PATH mostra `| BD: MongoDB` i SUMMARY mostra `BD: MongoDB (localhost:27017)`.
+
+**B3 — Info de BD a `_workspace_services()` i `estat_serveis()`:**
+El bridge escaneja `docker ps --filter name=agent-` i retorna clau `_databases` amb
+type, container, port, connection_url per cada BD activa. La tool d'OpenWebUI
+formata aquesta info a `estat_serveis()`.
+
+**B4 — Guia post-desplegament:**
+Després de `print_final_summary()`, mostra el camí al fitxer `.env` i les variables
+de BD injectades. Per stacks Emergent, afegeix la connexió MongoDB explícita.
+
+### ✅ [RESOLT 2026-05-10] Bloc E — Estrès amb repos complexos (E1, E2, E4, E3)
+
+**E1 — Detecció bàsica de monorepos:**
+Nova funció `detect_monorepo_tool()` que detecta `turbo.json`, `nx.json`,
+`pnpm-workspace.yaml`, `lerna.json` i `workspaces` a `package.json`.
+Warning a `analyze_repo()`: "Monorepo detectat (turborepo) — cada package
+es tracta com a servei independent." Warnings visibles a `print_analysis()`.
+Fitxers de monorepo afegits a `discover_candidate_dirs()`.
+
+**E2 — Nous detectors de stacks:**
+3 detectors nous a `ALL_DETECTORS` (12 total):
+- `detect_deno_service()`: `deno.json`, `deno.jsonc`, `import_map.json`
+- `detect_elixir_service()`: `mix.exs` (detecta Phoenix vs Elixir genèric)
+- `detect_dotnet_service()`: `*.csproj`, `*.fsproj`, `*.sln` (detecta ASP.NET vs genèric)
+Amb passos d'instal·lació i execució a `build_deterministic_plan()`.
+`req_map` actualitzat amb deno, elixir, dotnet.
+
+**E4 — Correcció de limitacions:**
+- `detect_python_service()`: afegits `wsgi.py`, `asgi.py`, `index.py`, `run.py`, `api.py`
+- `detect_go_service()`: escaneja fitxers `.go` i `.env.example` per trobar el port real
+  en lloc d'assumir 8080
+
+**E3 — `stress_test.sh`:**
+Nou script de bateria amb 7 repos complexos en mode `analyze` (detecció):
+turborepo, nx-examples, phoenix, deno, dotnet-samples, microservices-demo, lerna.
+Mostra stack detectat, tipus, i warnings de monorepo.
+
+### ✅ [RESOLT 2026-05-10] Cloud Services — Serveis cloud amb fallback local
+
+**`CLOUD_TO_LOCAL`** (al costat de `DB_DOCKER_CONFIGS`):
+```python
+CLOUD_TO_LOCAL = {
+    "supabase": "postgresql",      # Supabase → PostgreSQL local
+    "mongodb_atlas": "mongodb",    # MongoDB Atlas → MongoDB local
+}
+```
+
+Quan l'agent detecta un servei cloud (`DB_HINT_PATTERNS`, README, o codi),
+resol automàticament a l'alternativa local via Docker. L'usuari veu:
+- Al `print_final_summary()`: "☁️ Supabase detectat → PostgreSQL local"
+- Al wizard: "BD: supabase → postgresql local"
+- Per canviar a cloud: definir les vars d'entorn reals al `.env`
+
+Implementat a:
+- `analyze_repo()`: detecta cloud → afegeix local fallback a `db_hints`, guarda a `cloud_services`
+- `build_db_provision_steps()`: resol cloud → local abans de provisionar
+- `print_final_summary()`: secció `☁️ Serveis cloud` + etiqueta `supabase (→ postgresql local)`
+- Bridge wizard: `_DB_ENV_PATTERNS` inclou supabase, SUMMARY/CONFIRM_PATH mostren fallback
+
 ## Problemes coneguts pendents (PRIORITAT ALTA → BAIXA)
 
-### 1. [MITJA] Repos-col·lecció generen 60+ passos
-Vegeu casos #07, #09, #10 a INFORME_BATERIA. Necessari un pre-classifier que detecti "és un index, no una app" i demani tria.
-
-### 2. [BAIXA] `diagnose_error_with_model` + `ask_model_for_repair` són dues crides desconnectades
+### 1. [BAIXA] `diagnose_error_with_model` + `ask_model_for_repair` són dues crides desconnectades
 El "debugger" actual no té memòria entre intents ni context del repo. Vegeu el patch `debugger_patch.py` que ja vam dissenyar (cal aplicar).
 
-### 3. [BAIXA] Smoke tests només per stack Emergent
-`run_smoke_tests()` fa servir paths hardcoded `/api/`, `/api/health`. Cal generalitzar per stack detectat.
+### 2. [BAIXA] bench.sh no passa --non-interactive
+El mode `analyze` del bench falla repos que demanen secrets o deps del sistema
+(vite, nextjs, gradio, go-example, fastapi-mongo) per EOF en lectura interactiva.
+Resultat: 5/10 falsos negatius al bench complet. Fix: afegir `--non-interactive`
+a la crida `analyze` de bench.sh (branca `chore/bench-non-interactive`).
+
+### ✅ [RESOLT 2026-05-10] 5 Millores de fiabilitat (versions runtime, pre-classificador, monorepo, smoke tests, rollback)
+
+**Versions runtime:** `read_runtime_versions()` llegeix `.python-version`, `.nvmrc`, `.node-version`,
+`go.mod`, `package.json` (`engines.node`), `.tool-versions`. `check_runtime_versions()` compara amb
+les versions instal·lades i genera warnings (mai bloquegen).
+
+**Pre-classificador:** `classify_repo_type()` identifica `collection`, `documentation`, `library`,
+`monorepo`, `unknown`, `application`. Evita generar 60+ passos per a repos-col·lecció.
+
+**Orquestració monorepo:** `detect_monorepo_tool()` guarda resultat a `analysis.monorepo_tool`.
+`build_deterministic_plan()` afegeix pas d'instal·lació workspace al root (`pnpm install -r`,
+`npm install -ws`, `npx lerna bootstrap`). Reordena passos: `install`/`migrate` abans de `run`.
+
+**Smoke tests adaptatius:** `_framework_endpoints(svc)` retorna endpoints canònics per framework
+(`/docs` per FastAPI, `/actuator/health` per Spring, `/health` per Flask/ASP.NET...).
+`run_smoke_tests()` prova fins a 3 endpoints per servei, primer 2xx/3xx = OK.
+
+**Rollback en error:** `_backup_env_files()` còpia `.env` → `.env.agent-backup`. Si un pas crític
+falla, `_execute_rollback()` atura processos, contenidors BD i restaura `.env` dels backups.
+
+### ✅ [RESOLT 2026-05-10] 3 Millores per repos complexos (tool detection, auto-install, noise filter)
+
+**Tool detection:** `_TOOL_REPO_NAMES` (turborepo, deno, lerna, phoenix, nx) i `_TOOL_MARKER_FILES`
+(turbo.json, pnpm-workspace.yaml, lerna.json). `classify_repo_type()` retorna `"tool"` per tools
+i `analyze_repo()` salta la detecció de serveis. Impacte: turborepo 15→0 serveis, deno 59→0,
+phoenix 4→0, lerna 2→0.
+
+**Auto-install runtimes:** `_install_system_dep()` instal·la automàticament deps amb
+`--approve-all`. Nous runtimes a `SYSTEM_DEPS`: deno, elixir, mix. pnpm/yarn usen `corepack`.
+
+**Noise filter:** `SKIP_DIRS` ampliat amb `__tests__`, `tests`, `test`, `spec`, `fixtures`,
+`mocks`, `e2e`, `cypress`, `playwright`. `_is_test_or_fixture_file()` filtra `*.test.*`,
+`*.spec.*`, `*_test.*` a `discover_candidate_dirs()`.
+
+### ✅ [RESOLT 2026-05-10] KB d'èxits: clau inclou repo_name
+
+`_stack_key()` a `agents/success_kb.py` ara inclou `repo_name` a la clau hash. Abans dos repos
+Node amb `package.json` compartien pla (ex: node-js-sample i Mantine rebien el mateix pla).
+Ara `node-js-sample::node/npm` i `mantine::node/npm` són entrades separades.
+
+### ✅ [RESOLT 2026-05-11] Build + Migracions + DB Health
+
+**Build step Node:** `build_deterministic_plan()` detecta `"build"` a `package.json` scripts
+i afegeix pas `pnpm build`/`yarn build`/`npm run build` entre install i run. Next.js sense
+script build → `npx next build`.
+
+**Migrations Node/PHP:** Prisma (`prisma/schema.prisma` → `npx prisma migrate deploy`),
+Knex (`knexfile.js` → `npx knex migrate:latest`), Sequelize (`.sequelizerc` →
+`npx sequelize-cli db:migrate`), Laravel (`php artisan migrate --force`).
+Categoria `"migrate"` ordena 1 (després d'install=0, abans de run=4). `critical=False`.
+
+**DB Health + ordre:** `"db": -1` a `_CATEGORY_ORDER` (contenidors s'arrenquen primer).
+`verify_step` activat per `category in ("run", "db")`. Health check `nc -z` inline al
+`docker run` (fins a 30 intents de 2s). Rollback atura contenidors en cas d'error.
+
+**pnpm/yarn sense sudo:** `npm install -g pnpm --prefix ~/.local` (no requereix password).
+
+**KB d'èxits:** `_stack_key()` a `agents/success_kb.py` inclou `repo_name` a la clau hash.
+Abans dos repos Node amb `package.json` compartien pla. Ara clau tipus `repo::stack`.
 
 ### ✅ [RESOLT 2026-05-10] bartolo-doctor.sh: 2 bugs menors
 1. **Pas 2 — `/proc/PID/environ` Permission denied:** El codi ja ho gestiona correctament
@@ -268,7 +443,7 @@ Fitxers `test_<nom>.py` al root del projecte. Execució: `python3 test_<nom>.py`
 Cap framework extern — `sys.exit(1)` si hi ha fallades. Exemple: `test_node_library_detection.py`.
 
 ### Backups `.bak_<motiu>` abans d'editar fitxers grans
-Abans d'editar `universal_repo_agent_v5.py` (2786 línies), crear còpia amb
+Abans d'editar `universal_repo_agent_v5.py` (3287 línies), crear còpia amb
 `cp universal_repo_agent_v5.py universal_repo_agent_v5.py.bak_<motiu>`.
 Permet revertir manualment si cal sense dependre de git.
 

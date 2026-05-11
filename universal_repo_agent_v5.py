@@ -47,6 +47,8 @@ from urllib.parse import urlparse
 
 import requests
 
+from agents.success_kb import lookup_plan, record_success
+
 
 OLLAMA_CHAT_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")
 DEFAULT_MODEL = "qwen2.5-coder:14b"
@@ -105,8 +107,8 @@ SYSTEM_DEPS: Dict[str, Dict[str, str]] = {
     "docker": {"check": "docker --version", "install": "https://docs.docker.com/engine/install/"},
     "make": {"check": "make --version", "install": "sudo apt-get install -y build-essential"},
     "go": {"check": "go version", "install": "sudo apt-get install -y golang-go"},
-    "pnpm": {"check": "pnpm --version", "install": "npm install -g pnpm"},
-    "yarn": {"check": "yarn --version", "install": "npm install -g yarn"},
+    "pnpm": {"check": "pnpm --version", "install": "npm install -g pnpm --prefix ~/.local 2>/dev/null; export PATH=$HOME/.local/bin:$PATH; pnpm --version"},
+    "yarn": {"check": "yarn --version", "install": "npm install -g yarn --prefix ~/.local 2>/dev/null; export PATH=$HOME/.local/bin:$PATH; yarn --version"},
     "cargo": {"check": "cargo --version", "install": "curl https://sh.rustup.rs -sSf | sh"},
     "ruby": {"check": "ruby --version", "install": "sudo apt-get install -y ruby"},
     "bundle": {"check": "bundle --version", "install": "gem install bundler"},
@@ -114,6 +116,9 @@ SYSTEM_DEPS: Dict[str, Dict[str, str]] = {
     "composer": {"check": "composer --version", "install": "https://getcomposer.org/download/"},
     "java": {"check": "java -version", "install": "sudo apt-get install -y default-jdk"},
     "mvn": {"check": "mvn --version", "install": "sudo apt-get install -y maven"},
+    "deno": {"check": "deno --version", "install": "curl -fsSL https://deno.land/install.sh | sh"},
+    "elixir": {"check": "elixir --version", "install": "sudo apt-get install -y elixir"},
+    "mix": {"check": "mix --version", "install": "sudo apt-get install -y elixir"},
 }
 
 DB_DOCKER_CONFIGS: Dict[str, Dict[str, Any]] = {
@@ -151,6 +156,13 @@ DB_DOCKER_CONFIGS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# Cloud → local fallback: quan un repo necessita un servei cloud,
+# provisionem l'alternativa local automàticament.
+CLOUD_TO_LOCAL: Dict[str, str] = {
+    "supabase": "postgresql",
+    "mongodb_atlas": "mongodb",
+}
+
 README_NAMES = [
     "README.md", "README.rst", "README.txt", "README", "INSTALL.md", "INSTALL.txt", "GETTING_STARTED.md", "docs/INSTALL.md",
 ]
@@ -161,6 +173,10 @@ ENV_EXAMPLE_NAMES = [
 
 SKIP_DIRS = {
     "node_modules", ".git", ".venv", "venv", "__pycache__", "dist", "build", "target", ".agent_logs", ".next", "out",
+    "__tests__", "__mocks__", "__fixtures__",
+    "tests", "test", "spec", "specs",
+    "fixtures", "mocks", "__snapshots__",
+    "e2e", "cypress", "playwright",
 }
 
 DB_HINT_PATTERNS: Dict[str, Sequence[str]] = {
@@ -212,6 +228,10 @@ class RepoAnalysis:
     setup_scripts_found: List[str] = field(default_factory=list)
     readme_instructions: List[str] = field(default_factory=list)
     db_provisioned: List[str] = field(default_factory=list)
+    cloud_services: List[str] = field(default_factory=list)
+    runtime_version_warnings: List[str] = field(default_factory=list)
+    monorepo_tool: Optional[str] = None
+    repo_type: str = "application"
 
 
 @dataclass
@@ -403,6 +423,121 @@ def run_check(command: str) -> bool:
         return False
 
 
+def run_check_version(command: str) -> Optional[str]:
+    """Com run_check() pero retorna la primera linia de stdout (la versio)."""
+    try:
+        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=15)
+        if result.returncode == 0:
+            return (result.stdout + result.stderr).strip().split("\n")[0]
+    except Exception:
+        pass
+    return None
+
+
+def parse_version(version_str: str) -> Tuple[int, ...]:
+    """Parseja una cadena de versio a tupla d'enters. 'v20.5.1' → (20,5,1), '>=1.21' → (1,21)."""
+    v = version_str.strip().lstrip("vV").lstrip("go").strip()
+    v = v.lstrip("^~>=<").strip()
+    parts = v.replace("-", ".").replace("_", ".").split(".")[:3]
+    nums: List[int] = []
+    for p in parts:
+        try:
+            nums.append(int(p.split("+")[0]))
+        except ValueError:
+            break
+    return tuple(nums) if nums else ()
+
+
+_RUNTIME_VERSION_FILES = {
+    ".python-version": "python3",
+    ".nvmrc": "node",
+    ".node-version": "node",
+}
+
+
+def read_runtime_versions(root: Path) -> Dict[str, str]:
+    """Llegeix restriccions de versio des de fitxers estandard del repo.
+    Retorna dict tool_name → constraint (ex: {'python3': '3.11', 'node': '>=20'})."""
+    constraints: Dict[str, str] = {}
+    for filename, tool in _RUNTIME_VERSION_FILES.items():
+        f = root / filename
+        if f.is_file():
+            v = f.read_text().strip().split("\n")[0].split("#")[0].strip()
+            if v:
+                constraints[tool] = v
+    for f in (root / ".go-version",):
+        if f.is_file():
+            v = f.read_text().strip().split("\n")[0].strip()
+            if v:
+                constraints["go"] = v
+    go_mod = root / "go.mod"
+    if go_mod.is_file():
+        first = go_mod.read_text().split("\n")[0].strip()
+        if first.startswith("module ") or first.startswith("go "):
+            for line in go_mod.read_text().split("\n")[:5]:
+                line = line.strip()
+                if line.startswith("go "):
+                    constraints["go"] = line[3:].strip()
+                    break
+    pkg = root / "package.json"
+    if pkg.is_file():
+        try:
+            data = json.loads(pkg.read_text(errors="ignore"))
+            engines = data.get("engines", {})
+            if isinstance(engines, dict):
+                if engines.get("node"):
+                    constraints["node"] = str(engines["node"])
+                if engines.get("pnpm"):
+                    constraints["pnpm"] = str(engines["pnpm"])
+        except Exception:
+            pass
+    asdf = root / ".tool-versions"
+    if asdf.is_file():
+        for line in asdf.read_text().splitlines()[:20]:
+            parts = line.strip().split()
+            if len(parts) >= 2:
+                tool = parts[0]
+                version = parts[1]
+                if tool in ("python", "python3"):
+                    constraints.setdefault("python3", version)
+                elif tool == "nodejs":
+                    constraints.setdefault("node", version)
+                elif tool in ("golang", "go"):
+                    constraints.setdefault("go", version)
+                elif tool not in constraints:
+                    constraints[tool] = version
+    return constraints
+
+
+_RUNTIME_CHECK_TOOLS = {
+    "python3": SYSTEM_DEPS["python3"]["check"] if "python3" in SYSTEM_DEPS else "python3 --version",
+    "node": SYSTEM_DEPS.get("node", {}).get("check", "node --version"),
+    "go": SYSTEM_DEPS.get("go", {}).get("check", "go version"),
+    "pnpm": SYSTEM_DEPS.get("pnpm", {}).get("check", "pnpm --version"),
+    "ruby": SYSTEM_DEPS.get("ruby", {}).get("check", "ruby --version"),
+}
+
+
+def check_runtime_versions(constraints: Dict[str, str]) -> List[str]:
+    """Compara les versions requerides amb les instal·lades. Retorna warnings."""
+    warnings: List[str] = []
+    for tool, constraint in constraints.items():
+        check_cmd = _RUNTIME_CHECK_TOOLS.get(tool)
+        if not check_cmd:
+            continue
+        actual = run_check_version(check_cmd)
+        if not actual:
+            warnings.append(f"{tool}: requereix {constraint}, pero no s'ha pogut detectar la versio instal·lada")
+            continue
+        req = parse_version(constraint)
+        cur = parse_version(actual)
+        if not req or not cur:
+            continue
+        if cur < req:
+            warnings.append(f"{tool}: requereix {constraint}, instal·lat {actual}")
+    return warnings
+
+
 def write_log(log_dir: Path, name: str, content: str) -> Path:
     path = log_dir / name
     path.write_text(content, encoding="utf-8")
@@ -579,7 +714,7 @@ def acquire_input(input_value: str, workspace: Path, github_token: str = "", git
             shutil.rmtree(target)
         clone_url = inject_git_token(input_value, github_token=github_token, gitlab_token=gitlab_token, bitbucket_token=bitbucket_token)
         info(f"Clonant {input_value} → {target}")
-        result = run_shell(f"git clone {clone_url} {target}", cwd=workspace, timeout=300)
+        result = run_shell(f"git clone --recurse-submodules {clone_url} {target}", cwd=workspace, timeout=300)
         if result.returncode != 0:
             raise AgentError(f"git clone ha fallat (codi {result.returncode}):\n{tail_lines(result.stderr, 10)}")
         info("Repositori clonat ✅")
@@ -732,16 +867,23 @@ def _build_pg_credentials_step(root: Path) -> Optional["CommandStep"]:
 def build_db_provision_steps(db_hints: List[str]) -> Tuple[List[CommandStep], Dict[str, str]]:
     steps: List[CommandStep] = []
     env_vars: Dict[str, str] = {}
+    provisioned: set[str] = set()
     for db_key in db_hints:
-        cfg = DB_DOCKER_CONFIGS.get(db_key)
+        # Si és un servei cloud, usem el fallback local
+        actual_db = CLOUD_TO_LOCAL.get(db_key, db_key)
+        if actual_db in provisioned:
+            continue
+        cfg = DB_DOCKER_CONFIGS.get(actual_db)
         if not cfg:
             continue
+        provisioned.add(actual_db)
         container = cfg["container"]
         image = cfg["image"]
         port = cfg["port"]
         env_flags = " ".join(f'-e {k}="{v}"' for k, v in cfg["env_vars"].items())
-        command = f"docker inspect {container} > /dev/null 2>&1 && docker start {container} || docker run -d --name {container} -p {port}:{port} {env_flags} {image}"
-        steps.append(CommandStep(id=f"db-provision-{db_key}", title=f"Provisió automàtica de {db_key.upper()} (Docker)", cwd="/tmp", command=command, expected_outcome=f"Contenidor {db_key} en execució al port {port}", critical=False, category="db", verify_port=port))
+        command = f"docker inspect {container} > /dev/null 2>&1 && docker start {container} || (docker run -d --name {container} -p {port}:{port} {env_flags} {image} && for i in $(seq 1 30); do nc -z localhost {port} 2>/dev/null && break; sleep 2; done)"
+        display_name = f"{db_key} → {actual_db}" if db_key != actual_db else db_key
+        steps.append(CommandStep(id=f"db-provision-{db_key}", title=f"Provisió automàtica de {display_name.upper()} (Docker)", cwd="/tmp", command=command, expected_outcome=f"Contenidor {actual_db} en execució al port {port}", critical=False, category="db", verify_port=port))
         env_vars[cfg["url_env"]] = cfg["url_template"]
         env_vars.update(cfg["env_vars"])
     return steps, env_vars
@@ -787,6 +929,101 @@ def report_missing_deps(missing: List[str], auto_approve: bool = False) -> bool:
         return True
     answer = input("Vols continuar igualment? [s/N]: ").strip().lower()
     return answer in {"s", "si", "y", "yes"}
+
+
+def _install_system_dep(dep: str) -> bool:
+    """Intenta instal·lar una dependència del sistema amb la comanda de SYSTEM_DEPS."""
+    dep_info = SYSTEM_DEPS.get(dep)
+    if not dep_info:
+        return False
+    install_cmd = dep_info.get("install", "")
+    if not install_cmd or install_cmd.startswith("http"):
+        warn(f"No es pot instal·lar {dep} automàticament. Consulta: {install_cmd}")
+        return False
+    info(f"Instal·lant {dep} automàticament ({install_cmd})...")
+    try:
+        result = subprocess.run(
+            install_cmd, shell=True, timeout=120
+        )
+        if result.returncode != 0:
+            warn(f"Instal·lació de {dep} ha fallat (rc={result.returncode})")
+            return False
+    except subprocess.TimeoutExpired:
+        warn(f"Instal·lació de {dep} ha excedit el timeout (120s)")
+        return False
+    check_cmd = dep_info.get("check", f"which {dep}")
+    if not run_check(check_cmd):
+        warn(f"{dep} instal·lat però no es detecta amb '{check_cmd}'")
+        return False
+    info(f"{dep} instal·lat correctament")
+    return True
+
+
+def preflight_check(missing_deps: List[str], ports_hint: Optional[List[int]] = None,
+                    auto_approve: bool = False) -> bool:
+    """Pre-flight check ràpid abans de generar el pla. Retorna True si OK per continuar."""
+    import shutil as _shutil
+    all_ok = True
+    lines: List[str] = []
+
+    # 1. Dependències del sistema
+    if missing_deps:
+        all_ok = False
+        installed: List[str] = []
+        for dep in missing_deps:
+            hint = SYSTEM_DEPS.get(dep, {}).get("install", f"sudo apt-get install -y {dep}")
+            if auto_approve:
+                ok_result = _install_system_dep(dep)
+                if ok_result:
+                    installed.append(dep)
+                    lines.append(f"  ✅ {dep} instal·lat automàticament")
+                else:
+                    lines.append(f"  ⚠️  {dep} NO s'ha pogut instal·lar → {hint}")
+            else:
+                lines.append(f"  ⚠️  {dep} NO instal·lat → {hint}")
+        if installed and set(installed) == set(missing_deps):
+            all_ok = True
+    else:
+        lines.append("  ✅ Dependències del sistema OK")
+
+    # 2. Espai disc (>500MB lliures al home)
+    try:
+        home = Path.home()
+        usage = _shutil.disk_usage(home)
+        free_gb = usage.free / (1024**3)
+        if free_gb < 0.5:
+            all_ok = False
+            lines.append(f"  ⚠️  Espai disc crític: {free_gb:.1f} GB lliures a {home}")
+        else:
+            lines.append(f"  ✅ Espai disc: {free_gb:.1f} GB lliures")
+    except Exception:
+        pass
+
+    # 3. Ports
+    if ports_hint:
+        conflicts = []
+        for p in ports_hint[:5]:
+            if is_port_open(p):
+                conflicts.append(p)
+        if conflicts:
+            all_ok = False
+            lines.append(f"  ⚠️  Ports ocupats: {', '.join(map(str, conflicts))}")
+        else:
+            lines.append(f"  ✅ Ports lliures: {', '.join(map(str, ports_hint[:5]))}")
+
+    print("\n🔍 Pre-flight check:")
+    for line in lines:
+        print(line)
+
+    if not all_ok:
+        print()
+        if auto_approve:
+            warn("auto-approve: continuant tot i els avisos.")
+            return True
+        answer = input("Vols continuar igualment? [S/n]: ").strip().lower()
+        if answer and answer not in {"s", "si", "y", "yes"}:
+            return False
+    return True
 
 
 def find_env_examples(root: Path) -> List[Path]:
@@ -979,7 +1216,7 @@ def detect_node_service(path: Path) -> Optional[ServiceInfo]:
 def detect_python_service(path: Path) -> Optional[ServiceInfo]:
     req = path / "requirements.txt"
     pyproject = path / "pyproject.toml"
-    candidates = [path / n for n in ("server.py", "main.py", "app.py", "manage.py", "database.py", "config.py", "settings.py")]
+    candidates = [path / n for n in ("server.py", "main.py", "app.py", "manage.py", "wsgi.py", "asgi.py", "index.py", "run.py", "api.py", "database.py", "config.py", "settings.py")]
     if not req.exists() and not pyproject.exists() and not any(p.exists() for p in candidates):
         return None
     manifests: List[str] = []
@@ -1033,7 +1270,36 @@ def detect_docker_service(path: Path) -> Optional[ServiceInfo]:
 
 
 def detect_go_service(path: Path) -> Optional[ServiceInfo]:
-    return ServiceInfo(name=path.name, path=str(path), service_type="go", framework="go", entry_hints=["go run ./...", "go build"], manifests=["go.mod"], confidence=0.75, run_url="http://localhost:8080") if (path / "go.mod").exists() else None
+    go_mod = path / "go.mod"
+    if not go_mod.exists():
+        return None
+    port = 8080
+    # Escaneja fitxers .go propers per trobar el port real
+    go_files = list(path.glob("*.go")) + list(path.glob("*/*.go"))[:5]
+    for gf in go_files:
+        try:
+            text = gf.read_text(errors="ignore")[:4000]
+            ports = detect_ports_from_text(text)
+            if ports:
+                port = ports[0]
+                break
+        except Exception:
+            pass
+    # També revisa .env.example si existeix
+    for env_name in (".env.example", ".env.sample", ".env"):
+        env_file = path / env_name
+        if env_file.exists():
+            try:
+                ports = detect_ports_from_text(env_file.read_text(errors="ignore")[:2000])
+                if ports:
+                    port = ports[0]
+                    break
+            except Exception:
+                pass
+    return ServiceInfo(name=path.name, path=str(path), service_type="go", framework="go",
+                       entry_hints=["go run ./...", "go build"], manifests=["go.mod"],
+                       confidence=0.75, run_url=f"http://localhost:{port}")
+
 
 
 def detect_rust_service(path: Path) -> Optional[ServiceInfo]:
@@ -1075,7 +1341,95 @@ def detect_makefile_service(path: Path) -> Optional[ServiceInfo]:
     return ServiceInfo(name=path.name, path=str(path), service_type="make", framework="make", entry_hints=useful or targets[:5], manifests=["Makefile"], confidence=0.6)
 
 
-ALL_DETECTORS = [detect_node_service, detect_python_service, detect_docker_service, detect_go_service, detect_rust_service, detect_ruby_service, detect_php_service, detect_java_service, detect_makefile_service]
+def detect_monorepo_tool(path: Path) -> Optional[str]:
+    """Detecta si el repo usa eines de monorepo (turbo, nx, workspaces, lerna)."""
+    if (path / "turbo.json").exists():
+        return "turborepo"
+    if (path / "nx.json").exists():
+        return "nx"
+    if (path / "pnpm-workspace.yaml").exists():
+        return "pnpm-workspace"
+    if (path / "lerna.json").exists():
+        return "lerna"
+    pkg = path / "package.json"
+    if pkg.exists():
+        try:
+            data = json.loads(pkg.read_text(errors="ignore"))
+            if isinstance(data.get("workspaces"), list) and data["workspaces"]:
+                return "npm-workspaces"
+        except Exception:
+            pass
+    return None
+
+
+def detect_deno_service(path: Path) -> Optional[ServiceInfo]:
+    """Detecta projectes Deno (deno.json, deno.jsonc, import_map.json)."""
+    deno_json = path / "deno.json"
+    deno_jsonc = path / "deno.jsonc"
+    import_map = path / "import_map.json"
+    if not deno_json.exists() and not deno_jsonc.exists():
+        return None
+    manifests: List[str] = []
+    if deno_json.exists():
+        manifests.append("deno.json")
+    if deno_jsonc.exists():
+        manifests.append("deno.jsonc")
+    if import_map.exists():
+        manifests.append("import_map.json")
+    text = ""
+    try:
+        text = read_text(deno_json if deno_json.exists() else deno_jsonc)
+    except Exception:
+        pass
+    ports = detect_ports_from_text(text)
+    run_url = f"http://localhost:{ports[0]}" if ports else "http://localhost:8001"
+    return ServiceInfo(name=path.name, path=str(path), service_type="deno", framework="deno",
+                       entry_hints=["deno run --allow-net main.ts", "deno task start"],
+                       manifests=manifests, confidence=0.65, run_url=run_url)
+
+
+def detect_elixir_service(path: Path) -> Optional[ServiceInfo]:
+    """Detecta projectes Elixir/Phoenix (mix.exs)."""
+    mix_exs = path / "mix.exs"
+    if not mix_exs.exists():
+        return None
+    try:
+        text = read_text(mix_exs).lower()
+    except Exception:
+        text = ""
+    fw = "phoenix" if "phoenix" in text else "elixir"
+    ports = detect_ports_from_text(text)
+    run_url = f"http://localhost:{ports[0]}" if ports else "http://localhost:4000" if fw == "phoenix" else None
+    return ServiceInfo(name=path.name, path=str(path), service_type="elixir", framework=fw,
+                       entry_hints=["mix phx.server" if fw == "phoenix" else "mix run --no-halt"],
+                       manifests=["mix.exs"], confidence=0.75, run_url=run_url)
+
+
+def detect_dotnet_service(path: Path) -> Optional[ServiceInfo]:
+    """Detecta projectes .NET (*.csproj, *.fsproj, *.sln)."""
+    csproj = list(path.glob("*.csproj"))
+    fsproj = list(path.glob("*.fsproj"))
+    sln = list(path.glob("*.sln"))
+    if not csproj and not fsproj and not sln:
+        return None
+    manifests = [p.name for p in csproj + fsproj + sln]
+    project_file = (csproj or fsproj)[0] if (csproj or fsproj) else None
+    text = ""
+    if project_file:
+        try:
+            text = read_text(project_file).lower()
+        except Exception:
+            pass
+    is_web = any(kw in text for kw in ("microsoft.aspnetcore", "web", 'sdk="microsoft.net.sdk.web"'))
+    fw = "aspnet" if is_web else "dotnet"
+    ports = detect_ports_from_text(text)
+    run_url = f"http://localhost:{ports[0]}" if ports else "http://localhost:5000" if is_web else None
+    return ServiceInfo(name=path.name, path=str(path), service_type="dotnet", framework=fw,
+                       entry_hints=["dotnet run", "dotnet watch run"],
+                       manifests=manifests, confidence=0.7, run_url=run_url)
+
+
+ALL_DETECTORS = [detect_node_service, detect_python_service, detect_docker_service, detect_go_service, detect_rust_service, detect_ruby_service, detect_php_service, detect_java_service, detect_makefile_service, detect_deno_service, detect_elixir_service, detect_dotnet_service]
 
 
 EXAMPLE_DIRS = {"examples", "example", "demo", "demos", "samples", "sample", "tutorials", "tutorial", "docs", "documentation"}
@@ -1127,21 +1481,239 @@ def is_library_package_root(root: Path) -> bool:
     return False
 
 
+_COLLECTION_README_PATTERNS = re.compile(
+    r"^#\s*Awesome\s|A curated list of|##\s*Table of Contents|##\s*Contents",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+_TOOL_REPO_NAMES: set[str] = {
+    "turborepo", "turbo", "lerna", "nx", "deno", "phoenix",
+}
+
+_TOOL_MARKER_FILES: set[str] = {
+    "turbo.json", "pnpm-workspace.yaml", "lerna.json",
+}
+
+_RUNNABLE_MANIFESTS = {
+    "package.json", "requirements.txt", "pyproject.toml", "go.mod",
+    "Cargo.toml", "mix.exs", "pom.xml", "build.gradle", "build.gradle.kts",
+    "composer.json", "Gemfile", "Makefile", "Dockerfile",
+    "docker-compose.yml", "docker-compose.yaml", "compose.yml",
+    "deno.json", "deno.jsonc",
+}
+
+
+def classify_repo_type(root: Path) -> str:
+    """Classifica el repositori abans d'escanejar serveis.
+
+    Retorna: 'collection', 'documentation', 'tool', 'library', 'monorepo', 'unknown', 'application'
+    """
+    name = root.name.lower()
+    readme = root / "README.md"
+    readme_text = read_text(readme, max_chars=3000) if readme.exists() else ""
+
+    # 1. Collection / awesome-list
+    if name.startswith("awesome-") or (readme_text and _COLLECTION_README_PATTERNS.search(readme_text)):
+        return "collection"
+
+    # 2. Documentation: pocs manifests, molts .md. Mirem fins a 2 nivells de profunditat
+    # (monorepos multi-servei tipus microservices-demo tenen manifests a src/*/package.json)
+    top_files = list(root.glob("*"))
+    top_manifests = [m for m in _RUNNABLE_MANIFESTS if (root / m).exists()]
+    sub_manifests: List[Path] = []
+    for d in root.iterdir():
+        if d.is_dir() and d.name not in SKIP_DIRS:
+            for m in _RUNNABLE_MANIFESTS:
+                if (d / m).exists():
+                    sub_manifests.append(d / m)
+            for sd in d.iterdir():
+                if sd.is_dir() and sd.name not in SKIP_DIRS:
+                    for m in _RUNNABLE_MANIFESTS:
+                        if (sd / m).exists():
+                            sub_manifests.append(sd / m)
+    has_runnable = bool(top_manifests) or bool(sub_manifests)
+    md_count = sum(1 for f in top_files if f.suffix == ".md")
+    if not has_runnable and md_count >= 5:
+        return "documentation"
+
+    # 2.5. Tool/runtime/framework repo (abans de library check)
+    if name in _TOOL_REPO_NAMES:
+        return "tool"
+    tool_markers = any((root / m).exists() for m in _TOOL_MARKER_FILES)
+    other_markers = any((root / m).exists() for m in _RUNNABLE_MANIFESTS if m not in _TOOL_MARKER_FILES)
+    if tool_markers and not other_markers:
+        return "tool"
+
+    # 3. Library (només si el manifest principal NO és runnable)
+    if is_library_package_root(root):
+        return "library"
+    pkg = root / "package.json"
+    other_runnable = any((root / m).exists() for m in _RUNNABLE_MANIFESTS if m != "package.json")
+    if pkg.exists() and not other_runnable:
+        try:
+            data = json.loads(pkg.read_text(errors="ignore"))
+            if is_node_library(data):
+                return "library"
+        except Exception:
+            pass
+
+    # 4. Monorepo
+    if detect_monorepo_tool(root):
+        return "monorepo"
+
+    # 5. Unknown: cap manifest executable a root ni subdirectoris
+    if not has_runnable:
+        return "unknown"
+
+    return "application"
+
+
+MAX_CANDIDATES = 60
+
+
+def _parse_pnpm_workspace_packages(root: Path) -> List[str]:
+    """Extreu la llista de globs de packages d'un pnpm-workspace.yaml."""
+    ws = root / "pnpm-workspace.yaml"
+    if not ws.exists():
+        return []
+    globs: List[str] = []
+    in_packages = False
+    for line in ws.read_text().splitlines():
+        stripped = line.strip()
+        if re.match(r'^packages\s*:', stripped):
+            in_packages = True
+            continue
+        if in_packages:
+            m = re.match(r'\s*[-*]\s+["\']?([^"\'\s#]+)', line)
+            if m:
+                globs.append(m.group(1))
+            elif stripped and not stripped.startswith('#') and not stripped.startswith('-'):
+                if not line.startswith('  ') and not line.startswith('\t'):
+                    break
+    return globs
+
+
+def _expand_workspace_globs(root: Path, globs: List[str]) -> Set[Path]:
+    """Expandeix globs de workspace a un set de directoris concrets existents."""
+    dirs: Set[Path] = set()
+    for g in globs:
+        if g.startswith('!'):
+            continue
+        if '/' not in g:
+            p = root / g
+            if p.is_dir():
+                dirs.add(p)
+        elif g.endswith('/*'):
+            parent = root / g[:-2]
+            if parent.is_dir():
+                dirs.add(parent)
+                for child in parent.iterdir():
+                    if child.is_dir() and child.name not in SKIP_DIRS:
+                        dirs.add(child)
+        elif '*' in g:
+            # Cas: "crates/*/js"
+            idx = g.index('*')
+            prefix = g[:idx].rstrip('/')
+            suffix = g[idx+1:].lstrip('/')
+            parent = root / prefix
+            if parent.is_dir():
+                for child in parent.iterdir():
+                    if child.is_dir() and child.name not in SKIP_DIRS:
+                        target = child / suffix if suffix else child
+                        if target.is_dir():
+                            dirs.add(target)
+        elif '/' in g:
+            p = root / g
+            if p.is_dir():
+                dirs.add(p)
+    return dirs
+
+
+def _get_monorepo_workspace_dirs(root: Path) -> Optional[Set[Path]]:
+    """Calcula el set de directoris permesos per a un monorepo.
+    Retorna None si no es pot determinar (s'usa depth limit com a fallback)."""
+    globs = _parse_pnpm_workspace_packages(root)
+    if not globs:
+        pkg = root / "package.json"
+        if pkg.exists():
+            try:
+                data = json.loads(pkg.read_text(errors="ignore"))
+                ws = data.get("workspaces")
+                if isinstance(ws, list) and ws:
+                    globs = [str(w) for w in ws]
+            except Exception:
+                pass
+    if not globs:
+        lerna = root / "lerna.json"
+        if lerna.exists():
+            try:
+                data = json.loads(lerna.read_text(errors="ignore"))
+                pkgs = data.get("packages")
+                if isinstance(pkgs, list) and pkgs:
+                    globs = [str(p) for p in pkgs]
+            except Exception:
+                pass
+    if not globs:
+        return None
+    dirs = _expand_workspace_globs(root, globs)
+    dirs.add(root)
+    return dirs
+
+
+_TEST_FILE_PATTERNS = (
+    ".test.", ".spec.", "_test.", "_spec.", "test.", "spec.",
+    ".fixture.", ".mock.", ".snap.",
+)
+
+
+def _is_test_or_fixture_file(filename: str) -> bool:
+    return any(pat in filename for pat in _TEST_FILE_PATTERNS)
+
+
 def discover_candidate_dirs(root: Path) -> List[Path]:
-    manifest_files = {"package.json", "requirements.txt", "pyproject.toml", "Dockerfile", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "Makefile", "go.mod", "Cargo.toml", "Gemfile", "composer.json", "pom.xml", "build.gradle", "build.gradle.kts"}
-    # Si el root és una llibreria Python, no mirem subdirectoris d'exemples
+    manifest_files = {"package.json", "requirements.txt", "pyproject.toml", "Dockerfile", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "Makefile", "go.mod", "Cargo.toml", "Gemfile", "composer.json", "pom.xml", "build.gradle", "build.gradle.kts", "turbo.json", "nx.json", "pnpm-workspace.yaml", "lerna.json", "deno.json", "deno.jsonc", "mix.exs"}
     is_library = is_library_package_root(root)
-    candidates = [root]
+    is_monorepo = detect_monorepo_tool(root) is not None
+    allowed_dirs = _get_monorepo_workspace_dirs(root) if is_monorepo else None
+    candidates: List[Path] = [root]
     for current_root, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
-        # Si és llibreria: salta subcarpetes d'exemples/docs
         if is_library:
             rel = Path(current_root).relative_to(root)
             if rel.parts and rel.parts[0] in EXAMPLE_DIRS:
                 dirs[:] = []
                 continue
-        if set(files) & manifest_files:
+        if is_monorepo:
+            cur = Path(current_root)
+            if allowed_dirs is not None:
+                if cur not in allowed_dirs:
+                    # No és workspace. Comprovem si és ancestre d'algun workspace.
+                    is_ancestor = False
+                    cur_s = str(cur) + os.sep
+                    for ad in allowed_dirs:
+                        if str(ad).startswith(cur_s):
+                            is_ancestor = True
+                            break
+                    if not is_ancestor:
+                        dirs[:] = []
+                elif cur != root:
+                    # És workspace. Si no té fills workspace, és fulla → no descendim.
+                    cur_s = str(cur) + os.sep
+                    has_children = any(str(ad).startswith(cur_s) for ad in allowed_dirs if ad != cur)
+                    if not has_children:
+                        dirs[:] = []
+            else:
+                # Fallback: límit de profunditat 2
+                depth = len(Path(current_root).relative_to(root).parts)
+                if depth >= 2:
+                    dirs[:] = []
+        effective_files = {f for f in files if not _is_test_or_fixture_file(f)}
+        if effective_files & manifest_files:
             candidates.append(Path(current_root))
+            if len(candidates) >= MAX_CANDIDATES:
+                break
+    if len(candidates) >= MAX_CANDIDATES:
+        warn(f"discover_candidate_dirs: {len(candidates)}+ candidats trobats, limitant a {MAX_CANDIDATES} (monorepo={is_monorepo})")
     seen: set[str] = set()
     result: List[Path] = []
     for p in sorted(candidates, key=lambda x: len(str(x))):
@@ -1149,7 +1721,7 @@ def discover_candidate_dirs(root: Path) -> List[Path]:
         if key not in seen:
             seen.add(key)
             result.append(p)
-    return result
+    return result[:MAX_CANDIDATES]
 
 
 def detect_db_hints_from_code(root: Path) -> List[str]:
@@ -1740,27 +2312,56 @@ class SmokeResult:
     detail: str
 
 
+def _framework_endpoints(svc) -> List[str]:
+    """Retorna endpoints canònics segons el framework del servei."""
+    fw = (svc.framework or "").lower()
+    if fw == "fastapi":
+        return ["/", "/api/", "/api/health", "/docs", "/health"]
+    if fw == "flask":
+        return ["/", "/health", "/api/health"]
+    if fw in ("express", "next"):
+        return ["/", "/api/", "/api/health"]
+    if fw == "spring":
+        return ["/", "/health", "/actuator/health"]
+    if fw in ("aspnet", "dotnet"):
+        return ["/", "/health"]
+    return ["/"]
+
+
 def run_smoke_tests(emergent: Optional[Dict[str, Any]], analysis: RepoAnalysis, timeout: int = 10) -> List[SmokeResult]:
-    """Executa tests mínims contra els serveis arrencats."""
+    """Executa tests mínims contra els serveis arrencats, adaptant endpoints al framework."""
     results: List[SmokeResult] = []
-    urls_to_test: List[Tuple[str, str]] = []
+    tested_urls: set = set()
+
     if emergent:
-        urls_to_test.extend([
-            ("Backend root /api/", "http://localhost:8001/api/"),
-            ("Backend /api/health", "http://localhost:8001/api/health"),
-            ("Frontend /", "http://localhost:3000/"),
-        ])
+        for name, url in [("Backend root /api/", "http://localhost:8001/api/"),
+                           ("Backend /api/health", "http://localhost:8001/api/health"),
+                           ("Frontend /", "http://localhost:3000/")]:
+            tested_urls.add(url)
+            try:
+                r = requests.get(url, timeout=timeout)
+                results.append(SmokeResult(name=name, success=r.status_code < 500, detail=f"HTTP {r.status_code}"))
+            except Exception as e:
+                results.append(SmokeResult(name=name, success=False, detail=str(e)[:80]))
+
     for svc in analysis.services:
-        if svc.run_url and not any(svc.run_url == u for _, u in urls_to_test):
-            urls_to_test.append((f"{svc.name} ({svc.framework})", svc.run_url))
-    for name, url in urls_to_test:
-        try:
-            r = requests.get(url, timeout=timeout)
-            ok = r.status_code < 500
-            results.append(SmokeResult(name=name, success=ok, detail=f"HTTP {r.status_code}"))
-        except Exception as e:
-            results.append(SmokeResult(name=name, success=False, detail=str(e)[:80]))
-    # Optional: pytest si el backend en té
+        if not svc.run_url:
+            continue
+        endpoints = _framework_endpoints(svc)[:3]
+        for ep in endpoints:
+            url = f"{svc.run_url.rstrip('/')}{ep}" if ep.startswith("/") else f"{svc.run_url.rstrip('/')}/{ep}"
+            if url in tested_urls:
+                continue
+            tested_urls.add(url)
+            try:
+                r = requests.get(url, timeout=timeout)
+                ok = r.status_code < 500
+                results.append(SmokeResult(name=f"{svc.name} {ep}", success=ok, detail=f"HTTP {r.status_code}"))
+                if r.status_code < 400:
+                    break  # primer OK ja valida el servei
+            except Exception as e:
+                results.append(SmokeResult(name=f"{svc.name} {ep}", success=False, detail=str(e)[:80]))
+
     if emergent:
         backend = Path(emergent["backend"])
         pytest_bin = backend / ".venv" / "bin" / "pytest"
@@ -1952,6 +2553,54 @@ def stop_services(workspace: Path, repo_name: str = "all") -> None:
     info(f"Total serveis aturats: {stopped}")
 
 
+def _backup_env_files(root: Path) -> Dict[str, str]:
+    """Còpia .env → .env.agent-backup per poder restaurar en cas d'error."""
+    backups: Dict[str, str] = {}
+    for env_file in root.rglob(".env"):
+        env_path = str(env_file)
+        backup_path = str(env_file) + ".agent-backup"
+        try:
+            shutil.copy2(env_path, backup_path)
+            backups[env_path] = backup_path
+        except Exception:
+            pass
+    return backups
+
+
+def _execute_rollback(analysis, workspace: Path) -> List[str]:
+    """Orquestra neteja en cas d'error: atura processos, contenidors BD, restaura .env."""
+    cleaned: List[str] = []
+    # 1) Atura processos del repo
+    try:
+        stop_services(workspace, analysis.repo_name)
+        cleaned.append(f"Processos aturats per {analysis.repo_name}")
+    except Exception as e:
+        cleaned.append(f"Error aturant processos: {e}")
+    # 2) Atura contenidors BD provisionats
+    for db_key in getattr(analysis, "db_provisioned", []) or []:
+        cfg = DB_DOCKER_CONFIGS.get(db_key, {})
+        container = cfg.get("container", "")
+        if container:
+            try:
+                subprocess.run(f"docker stop {container}", shell=True, capture_output=True, timeout=15)
+                cleaned.append(f"Contenidor BD aturat: {container}")
+            except Exception as e:
+                cleaned.append(f"Error aturant contenidor {container}: {e}")
+    # 3) Restaura .env des de backups
+    root = Path(analysis.root)
+    for env_file in root.rglob(".env.agent-backup"):
+        original = Path(str(env_file).replace(".agent-backup", ""))
+        try:
+            shutil.copy2(str(env_file), str(original))
+            env_file.unlink()
+            cleaned.append(f".env restaurat: {original}")
+        except Exception as e:
+            cleaned.append(f"Error restaurant {original}: {e}")
+    if cleaned:
+        info("Rollback executat: " + "; ".join(cleaned))
+    return cleaned
+
+
 def show_status(workspace: Path) -> None:
     data = load_services_registry(workspace)
     if not data:
@@ -1981,12 +2630,23 @@ def analyze_repo(root: Path, model: str = DEFAULT_MODEL, extract_readme: bool = 
     real_root = maybe_promote_single_nested_root(root)
     info(f"Analitzant: {real_root}")
     analysis = RepoAnalysis(root=str(real_root), repo_name=real_root.name, top_level_manifests=[p.name for p in real_root.iterdir() if p.is_file()])
+    analysis.repo_type = classify_repo_type(real_root)
     services: List[ServiceInfo] = []
-    for path in discover_candidate_dirs(real_root):
-        for detector in ALL_DETECTORS:
-            svc = detector(path)
-            if svc:
-                services.append(svc)
+    if analysis.repo_type in ("collection", "documentation", "tool"):
+        if analysis.repo_type == "tool":
+            analysis.warnings.append(
+                "El repo sembla una eina/runtime/framework, no una aplicació desplegable."
+            )
+        else:
+            analysis.warnings.append(
+                f"El repo sembla un recull ({analysis.repo_type}), no una aplicació ejecutable."
+            )
+    else:
+        for path in discover_candidate_dirs(real_root):
+            for detector in ALL_DETECTORS:
+                svc = detector(path)
+                if svc:
+                    services.append(svc)
     unique: Dict[Tuple[str, str], ServiceInfo] = {(svc.path, svc.service_type): svc for svc in services}
     analysis.services = list(unique.values())
     analysis.env_files_present = [str(p.relative_to(real_root)) for p in real_root.rglob("*.env*") if p.is_file()]
@@ -1997,14 +2657,28 @@ def analyze_repo(root: Path, model: str = DEFAULT_MODEL, extract_readme: bool = 
         analysis.readme_instructions = extract_instructions_from_readme(real_root, model)
     svc_types = {s.service_type for s in analysis.services}
     analysis.likely_fullstack = "node" in svc_types and bool(svc_types - {"node", "make", "docker"})
+    # E1: Detecció de monorepo
+    analysis.monorepo_tool = detect_monorepo_tool(real_root)
+    if analysis.monorepo_tool:
+        analysis.warnings.append(
+            f"Monorepo detectat ({analysis.monorepo_tool}) — cada package es tracta com a servei independent."
+        )
     db_hints = set(detect_db_hints_from_code(real_root))
     readme_low = (read_text(real_root / "README.md") + "\n" + read_text(real_root / "README_Linux.md")).lower()
     for db, kw in [("postgresql", "postgres"), ("supabase", "supabase"), ("mysql", "mysql"), ("mongodb", "mongodb"), ("redis", "redis")]:
         if kw in readme_low:
             db_hints.add(db)
     analysis.db_hints = sorted(db_hints)
+    # Cloud → local: per cada servei cloud detectat, afegim l'alternativa local
+    cloud_services = [db for db in analysis.db_hints if db in CLOUD_TO_LOCAL]
+    for cloud_db in cloud_services:
+        local_db = CLOUD_TO_LOCAL[cloud_db]
+        if local_db not in db_hints:
+            db_hints.add(local_db)
+            analysis.db_hints = sorted(db_hints)
+    analysis.cloud_services = cloud_services
     analysis.likely_db_needed = bool(analysis.db_hints)
-    req_map = {"node": ["node", "npm"], "python": ["python3", "pip3"], "docker": ["docker"], "go": ["go"], "rust": ["cargo"], "ruby": ["ruby", "bundle"], "php": ["php", "composer"], "java": ["java", "mvn"], "make": ["make"]}
+    req_map = {"node": ["node", "npm"], "python": ["python3", "pip3"], "docker": ["docker"], "go": ["go"], "rust": ["cargo"], "ruby": ["ruby", "bundle"], "php": ["php", "composer"], "java": ["java", "mvn"], "make": ["make"], "deno": ["deno"], "elixir": ["elixir", "mix"], "dotnet": ["dotnet"]}
     needed: List[str] = ["git"]
     for svc in analysis.services:
         needed.extend(req_map.get(svc.service_type, []))
@@ -2015,13 +2689,39 @@ def analyze_repo(root: Path, model: str = DEFAULT_MODEL, extract_readme: bool = 
         needed.append("docker")
     analysis.host_requirements = sorted(set(needed))
     analysis.missing_system_deps = check_system_dependencies(analysis.host_requirements)
+    analysis.runtime_version_warnings = check_runtime_versions(read_runtime_versions(real_root))
     if not analysis.services:
         analysis.warnings.append("No s'ha detectat cap manifest de servei conegut.")
     return analysis
 
 
-def choose_node_install_cmd(svc: ServiceInfo) -> str:
-    return {"pnpm": "pnpm install", "yarn": "yarn install"}.get(svc.package_manager or "", "npm install")
+def _detect_root_package_manager(root: Path) -> str:
+    """Detecta el package manager del root per a workspace install."""
+    if (root / "pnpm-lock.yaml").exists():
+        return "pnpm"
+    if (root / "yarn.lock").exists():
+        return "yarn"
+    return "npm"
+
+
+def choose_node_install_cmd(svc: ServiceInfo, monorepo_tool: Optional[str] = None) -> str:
+    pm = svc.package_manager or "npm"
+    if monorepo_tool:
+        # Workspace-level install al root del monorepo
+        if monorepo_tool in ("turborepo", "pnpm-workspace"):
+            return "pnpm install -r"
+        if monorepo_tool == "npm-workspaces":
+            return "npm install -ws"
+        if monorepo_tool == "lerna":
+            return "npx lerna bootstrap"
+        if monorepo_tool == "nx":
+            if pm == "pnpm":
+                return "pnpm install -r"
+            if pm == "yarn":
+                return "yarn install"
+            return "npm install -ws"
+    # Per-servei: instal·la només les dependencies del package concret
+    return {"pnpm": "pnpm install", "yarn": "yarn install"}.get(pm, "npm install")
 
 
 def choose_node_run_cmd(svc: ServiceInfo) -> Optional[str]:
@@ -2174,6 +2874,18 @@ def choose_service_verify(step_command: str, svc: ServiceInfo) -> Tuple[str, Opt
 
 
 def build_deterministic_plan(analysis: RepoAnalysis) -> ExecutionPlan:
+    # A3: Consulta la KB d'èxits — si aquest stack ja té un pla validat, reutilitza'l
+    if analysis.services:
+        kb_service_type = "+".join(sorted(set(s.service_type for s in analysis.services)))
+        kb_manifests = sorted(set(m for s in analysis.services for m in s.manifests))
+        cached = lookup_plan(kb_service_type, kb_manifests, analysis.repo_name)
+        if cached:
+            steps = [CommandStep(**s) for s in cached]
+            return ExecutionPlan(
+                summary=f"Pla reutilitzat de la KB d'èxits ({len(steps)} passos validats)",
+                steps=steps,
+                notes=[f"Stack {kb_service_type} — pla validat per execucions anteriors."],
+            )
     steps: List[CommandStep] = []
     notes: List[str] = []
     root = Path(analysis.root)
@@ -2225,11 +2937,58 @@ def build_deterministic_plan(analysis: RepoAnalysis) -> ExecutionPlan:
                 command, verify_port_num, verify_url = choose_service_verify(cmd, root_docker)
                 steps.append(CommandStep(id="docker-up", title="Inicia el stack amb docker compose", cwd=str(root), command=command, expected_outcome="Tots els serveis arrenquen correctament", category="run", verify_port=verify_port_num, verify_url=verify_url))
         return ExecutionPlan(summary="Docker Compose detectat al root del repositori.", steps=steps, notes=notes)
+    # Orquestració de monorepo: instal·la workspace al root abans dels passos per servei
+    if analysis.monorepo_tool:
+        root_pm = _detect_root_package_manager(root)
+        root_install = choose_node_install_cmd(
+            ServiceInfo(name=analysis.repo_name, path=str(root), service_type="node",
+                        package_manager=root_pm),
+            monorepo_tool=analysis.monorepo_tool,
+        )
+        steps.append(CommandStep(
+            id="monorepo-root-install",
+            title=f"Instal·la workspace del monorepo ({analysis.monorepo_tool})",
+            cwd=str(root), command=root_install,
+            expected_outcome=f"Dependències workspace instal·lades via {root_pm}",
+            category="install",
+        ))
+        notes.append(
+            f"Monorepo {analysis.monorepo_tool}: instal·lació workspace al root + "
+            "passos per servei independents."
+        )
     for svc in analysis.services:
         svc_path = Path(svc.path)
         st = svc.service_type
         if st == "node":
             steps.append(CommandStep(id=f"node-install-{slugify(svc.name)}", title=f"Instal·la dependències Node — {svc.name}", cwd=svc.path, command=choose_node_install_cmd(svc), expected_outcome="node_modules instal·lats", category="install"))
+            # Build step: si package.json té script "build", executar-lo abans de run
+            build_cmd = None
+            scripts = svc.scripts or {}
+            pm = svc.package_manager or "npm"
+            if "build" in scripts:
+                build_cmd = {"pnpm": "pnpm build", "yarn": "yarn build"}.get(pm, "npm run build")
+            elif svc.framework == "next" and "build" not in scripts:
+                build_cmd = "npx next build"
+            if build_cmd:
+                steps.append(CommandStep(id=f"node-build-{slugify(svc.name)}",
+                    title=f"Build — {svc.name}", cwd=svc.path, command=build_cmd,
+                    expected_outcome="Build completat", category="install"))
+            # Migrations Node: Prisma, Knex, Sequelize
+            if (svc_path / "prisma" / "schema.prisma").exists():
+                steps.append(CommandStep(id=f"prisma-migrate-{slugify(svc.name)}",
+                    title=f"Prisma migrate — {svc.name}", cwd=svc.path,
+                    command="npx prisma migrate deploy",
+                    expected_outcome="BD migrada (Prisma)", category="migrate", critical=False))
+            if (svc_path / "knexfile.js").exists() or (svc_path / "knexfile.ts").exists():
+                steps.append(CommandStep(id=f"knex-migrate-{slugify(svc.name)}",
+                    title=f"Knex migrate — {svc.name}", cwd=svc.path,
+                    command="npx knex migrate:latest",
+                    expected_outcome="BD migrada (Knex)", category="migrate", critical=False))
+            if (svc_path / ".sequelizerc").exists():
+                steps.append(CommandStep(id=f"sequelize-migrate-{slugify(svc.name)}",
+                    title=f"Sequelize migrate — {svc.name}", cwd=svc.path,
+                    command="npx sequelize-cli db:migrate",
+                    expected_outcome="BD migrada (Sequelize)", category="migrate", critical=False))
             run_cmd = choose_node_run_cmd(svc)
             if run_cmd:
                 command, verify_port_num, verify_url = choose_service_verify(run_cmd, svc)
@@ -2273,6 +3032,7 @@ def build_deterministic_plan(analysis: RepoAnalysis) -> ExecutionPlan:
         elif st == "php":
             steps.append(CommandStep(id=f"php-install-{slugify(svc.name)}", title=f"Composer install — {svc.name}", cwd=svc.path, command="composer install", expected_outcome="Composer deps instal·lades", category="install"))
             if svc.framework == "laravel":
+                steps.append(CommandStep(id=f"php-migrate-{slugify(svc.name)}", title=f"Artisan migrate — {svc.name}", cwd=svc.path, command="php artisan migrate --force", expected_outcome="BD migrada (Artisan)", category="migrate", critical=False))
                 steps.append(CommandStep(id=f"php-run-{slugify(svc.name)}", title=f"Laravel serve — {svc.name}", cwd=svc.path, command="php artisan serve --host=0.0.0.0 --port=8000", expected_outcome="Laravel a :8000", category="run", critical=False, verify_port=8000, verify_url="http://localhost:8000"))
             else:
                 steps.append(CommandStep(id=f"php-run-{slugify(svc.name)}", title=f"PHP built-in server — {svc.name}", cwd=svc.path, command="php -S 0.0.0.0:8000", expected_outcome="PHP a :8000", category="run", critical=False, verify_port=8000))
@@ -2290,6 +3050,20 @@ def build_deterministic_plan(analysis: RepoAnalysis) -> ExecutionPlan:
             preferred = next((t for t in ["run", "start", "serve", "dev", "up"] if t in targets), None)
             if preferred:
                 steps.append(CommandStep(id=f"make-{slugify(svc.name)}-{preferred}", title=f"make {preferred} — {svc.name}", cwd=svc.path, command=f"make {preferred}", expected_outcome=f"make {preferred} completat", category="run", critical=False))
+        elif st == "deno":
+            run_cmd = "deno task start" if (svc_path / "deno.json").exists() else "deno run --allow-net main.ts"
+            command, verify_port_num, verify_url = choose_service_verify(run_cmd, svc)
+            steps.append(CommandStep(id=f"deno-run-{slugify(svc.name)}", title=f"Deno run — {svc.name}", cwd=svc.path, command=command, expected_outcome="Servidor Deno disponible", category="run", critical=False, verify_port=verify_port_num, verify_url=verify_url))
+        elif st == "elixir":
+            steps.append(CommandStep(id=f"elixir-deps-{slugify(svc.name)}", title=f"Mix deps.get — {svc.name}", cwd=svc.path, command="mix deps.get", expected_outcome="Dependències Elixir instal·lades", category="install"))
+            run_cmd = "mix phx.server" if svc.framework == "phoenix" else "mix run --no-halt"
+            command, verify_port_num, verify_url = choose_service_verify(run_cmd, svc)
+            steps.append(CommandStep(id=f"elixir-run-{slugify(svc.name)}", title=f"Elixir run — {svc.name}", cwd=svc.path, command=command, expected_outcome="Servidor Elixir disponible", category="run", critical=False, verify_port=verify_port_num, verify_url=verify_url))
+        elif st == "dotnet":
+            steps.append(CommandStep(id=f"dotnet-restore-{slugify(svc.name)}", title=f"dotnet restore — {svc.name}", cwd=svc.path, command="dotnet restore", expected_outcome="Paquets NuGet restaurats", category="install"))
+            run_cmd = "dotnet watch run" if svc.framework == "aspnet" else "dotnet run"
+            command, verify_port_num, verify_url = choose_service_verify(run_cmd, svc)
+            steps.append(CommandStep(id=f"dotnet-run-{slugify(svc.name)}", title=f"dotnet run — {svc.name}", cwd=svc.path, command=command, expected_outcome="Servidor .NET disponible", category="run", critical=False, verify_port=verify_port_num, verify_url=verify_url))
     if not steps:
         manifests = analysis.top_level_manifests or []
         lib_manifests = [m for m in manifests if m in ("package.json", "setup.py", "setup.cfg", "pyproject.toml",
@@ -2299,6 +3073,9 @@ def build_deterministic_plan(analysis: RepoAnalysis) -> ExecutionPlan:
                          f"\n   Si és una app, cal un manifest de servei addicional (Dockerfile, Procfile, start.sh...).")
         else:
             notes.append("⚠️  No s'ha pogut derivar cap pla d'execució automàticament.")
+    # Reordena: install/migrate/setup abans de run (crític per monorepos)
+    _CATEGORY_ORDER = {"db": -1, "install": 0, "migrate": 1, "setup": 2, "configure": 3, "run": 4, "verify": 5}
+    steps.sort(key=lambda s: _CATEGORY_ORDER.get(getattr(s, "category", "run"), 99))
     return ExecutionPlan(summary="Pla generat automàticament a partir dels manifests del repositori.", steps=steps, notes=notes)
 
 
@@ -2545,6 +3322,9 @@ def print_analysis(analysis: RepoAnalysis) -> None:
     print(f"Nom: {analysis.repo_name}")
     print(f"Full-stack: {analysis.likely_fullstack}")
     print(f"Cal BD: {analysis.likely_db_needed}" + (f" ({', '.join(analysis.db_hints)})" if analysis.db_hints else ""))
+    if analysis.warnings:
+        for w in analysis.warnings:
+            print(f"⚠️  {w}")
     if analysis.missing_system_deps:
         print(f"⚠️  Falten: {', '.join(analysis.missing_system_deps)}")
     else:
@@ -2596,6 +3376,37 @@ def _extract_agent_pid(stdout: str) -> Optional[int]:
     return None
 
 
+_FALLBACK_MAP: Dict[str, List[str]] = {
+    "pnpm install": ["npm install", "npm install --legacy-peer-deps"],
+    "pnpm dev": ["npm run dev"],
+    "pnpm start": ["npm start"],
+    "pnpm build": ["npm run build"],
+    "go mod download": ["go version", "go env GOPATH"],
+    "yarn install": ["npm install", "npm install --legacy-peer-deps"],
+    "yarn dev": ["npm run dev"],
+    "yarn start": ["npm start"],
+    "pip install -r requirements.txt": ["pip install --break-system-packages -r requirements.txt"],
+}
+
+
+def _get_fallbacks(step: CommandStep, result: ExecutionResult) -> List[str]:
+    """Retorna llista de comandaments alternatius a provar abans del debugger LLM."""
+    cmd_key = step.command.strip()
+    # Match exacte
+    if cmd_key in _FALLBACK_MAP:
+        return _FALLBACK_MAP[cmd_key]
+    # Match per prefix (ex: "pnpm install --frozen-lockfile" → fallback de "pnpm install")
+    for key, fbs in _FALLBACK_MAP.items():
+        if cmd_key.startswith(key):
+            return fbs
+    # Fallback genèric per error 127 (command not found)
+    if result.returncode == 127 and cmd_key.startswith("pnpm"):
+        return ["npm install", "npm install --legacy-peer-deps"]
+    if result.returncode == 127 and cmd_key.startswith("yarn"):
+        return ["npm install"]
+    return []
+
+
 def execute_plan(analysis: RepoAnalysis, plan: ExecutionPlan, model: str, workspace: Path, approve_all: bool, dry_run: bool) -> Tuple[List[ExecutionResult], List[StepError]]:
     log_dir = workspace / LOG_DIRNAME
     results: List[ExecutionResult] = []
@@ -2642,7 +3453,7 @@ def execute_plan(analysis: RepoAnalysis, plan: ExecutionPlan, model: str, worksp
             )
             if pid:
                 info(f"Servei en background registrat (PID={pid}).")
-        if success and step.category == "run":
+        if success and step.category in ("run", "db"):
             success = verify_step(step)
             if not success:
                 current_result.returncode = 1
@@ -2651,6 +3462,22 @@ def execute_plan(analysis: RepoAnalysis, plan: ExecutionPlan, model: str, worksp
             info("Step succeeded.")
             continue
         warn(f"Step failed with code {current_result.returncode}.")
+        # Plan B ràpid: alternatives predefinides abans del debugger LLM
+        repaired = False
+        fallbacks = _get_fallbacks(step, current_result)
+        for fb_cmd in fallbacks:
+            info(f"Plan B: provant '{fb_cmd}'...")
+            fb_result = run_shell(fb_cmd, cwd=Path(step.cwd), repo_root=repo_root)
+            results.append(fb_result)
+            if fb_result.returncode == 0:
+                info(f"Plan B OK: '{fb_cmd}' ha funcionat.")
+                repaired = True
+                break
+            else:
+                warn(f"Plan B també ha fallat (rc={fb_result.returncode}).")
+        if repaired:
+            continue
+        # Si el plan B falla, escala al debugger LLM
         import sys as _sys
         _sys.path.insert(0, str(Path(__file__).parent))
         from agents.debugger import IntelligentDebugger
@@ -2665,7 +3492,17 @@ def execute_plan(analysis: RepoAnalysis, plan: ExecutionPlan, model: str, worksp
         errors.append(_repair.to_step_error(step))
         repaired = _repair.repaired
         if step.critical and not repaired:
+            _execute_rollback(analysis, workspace)
             raise AgentError(f"Critical step failed: {step.title}")
+    # A3: Registra el pla a la KB d'èxits si tots els passos han funcionat
+    if results and not dry_run and not [e for e in errors if not e.repaired]:
+        try:
+            if analysis.services:
+                kb_service_type = "+".join(sorted(set(s.service_type for s in analysis.services)))
+                kb_manifests = sorted(set(m for s in analysis.services for m in s.manifests))
+                record_success(kb_service_type, kb_manifests, [asdict(s) for s in plan.steps], analysis.repo_name)
+        except Exception:
+            pass  # Un fallo de KB mai ha de blocar un desplegament
     return results, errors
 
 
@@ -2679,12 +3516,66 @@ def print_final_summary(analysis: RepoAnalysis, plan: ExecutionPlan, results: Li
         print("URLs:")
         for url in urls:
             print(f"- {url}")
+    if analysis.cloud_services:
+        import shutil as _shutil
+        print("\n☁️  Serveis cloud detectats → alternativa local provisionada:")
+        for cloud_db in analysis.cloud_services:
+            local_db = CLOUD_TO_LOCAL.get(cloud_db, cloud_db)
+            cfg = DB_DOCKER_CONFIGS.get(local_db, {})
+            if cloud_db == "supabase":
+                print(f"  Supabase → PostgreSQL local (Supabase és PostgreSQL + Auth + Storage)")
+                if cfg:
+                    print(f"    Per usar Supabase cloud: defineix SUPABASE_URL i SUPABASE_ANON_KEY al .env")
+            elif cloud_db == "mongodb_atlas":
+                print(f"  MongoDB Atlas → MongoDB local")
+                if cfg:
+                    print(f"    Per usar MongoDB Atlas: defineix MONGODB_URI_ATLAS al .env")
     if analysis.db_provisioned or analysis.db_hints:
+        import shutil as _shutil
         print("BD local:")
         for db in analysis.db_provisioned or analysis.db_hints:
-            cfg = DB_DOCKER_CONFIGS.get(db, {})
-            if cfg:
-                print(f"- {db}: {cfg.get('url_template', '')}")
+            # Els cloud services es mostren a la secció superior, aquí mostrem la BD real
+            actual_db = CLOUD_TO_LOCAL.get(db, db)
+            cfg = DB_DOCKER_CONFIGS.get(actual_db, {})
+            if not cfg:
+                continue
+            env = cfg.get("env_vars", {})
+            label = db
+            if db in CLOUD_TO_LOCAL:
+                label = f"{db} (→ {CLOUD_TO_LOCAL[db]} local)"
+            print(f"\n  {label}")
+            print(f"     Contenidor: {cfg['container']}")
+            print(f"     Host:      localhost:{cfg['port']}")
+            if "POSTGRES_USER" in env:
+                print(f"     Usuari:    {env['POSTGRES_USER']}")
+                print(f"     Password:  {env['POSTGRES_PASSWORD']}")
+                print(f"     BD:        {env['POSTGRES_DB']}")
+            elif "MYSQL_USER" in env:
+                print(f"     Usuari:    {env['MYSQL_USER']}")
+                print(f"     Password:  {env['MYSQL_PASSWORD']}")
+                print(f"     BD:        {env['MYSQL_DATABASE']}")
+            print(f"     URL:       {cfg['url_template']}")
+            if db == "postgresql":
+                user = env.get("POSTGRES_USER", "agentuser")
+                bd = env.get("POSTGRES_DB", "agentdb")
+                print(f"     Connecta:  docker exec -it {cfg['container']} psql -U {user} -d {bd}")
+                if _shutil.which("psql"):
+                    print(f"     O:         psql {cfg['url_template']}")
+            elif db == "mysql":
+                user = env.get("MYSQL_USER", "agentuser")
+                bd = env.get("MYSQL_DATABASE", "agentdb")
+                pw = env.get("MYSQL_PASSWORD", "agentpass")
+                print(f"     Connecta:  docker exec -it {cfg['container']} mysql -u {user} -p{pw} {bd}")
+                if _shutil.which("mysql"):
+                    print(f"     O:         mysql {cfg['url_template']}")
+            elif db == "mongodb":
+                print(f"     Connecta:  docker exec -it {cfg['container']} mongosh")
+                if _shutil.which("mongosh"):
+                    print(f"     O:         mongosh {cfg['url_template']}")
+            elif db == "redis":
+                print(f"     Connecta:  docker exec -it {cfg['container']} redis-cli")
+                if _shutil.which("redis-cli"):
+                    print(f"     O:         redis-cli -u {cfg['url_template']}")
     print(f"Logs: {log_dir}")
 
 
@@ -2853,10 +3744,14 @@ def main() -> int:
             if emergent["uses_mongo"] and "mongodb" not in analysis.db_hints:
                 analysis.db_hints.append("mongodb")
 
-        if analysis.missing_system_deps:
-            if not report_missing_deps(analysis.missing_system_deps, auto_approve=args.approve_all):
-                err("Instal·la les dependències que falten i torna a executar l'agent.")
-                return 1
+        # Pre-flight check: deps + ports + disk (abans de generar pla)
+        svc_ports = [p for s in analysis.services for p in (s.ports_hint or [])]
+        if not preflight_check(analysis.missing_system_deps, ports_hint=svc_ports or None,
+                               auto_approve=args.approve_all):
+            return 1
+
+        # Backup .env abans de modificar (rollback)
+        _backup_env_files(Path(analysis.root))
 
         db_env_vars: Dict[str, str] = {}
         if analysis.likely_db_needed and not args.no_db_provision and is_docker_available():
@@ -2876,6 +3771,13 @@ def main() -> int:
             for d in missing_os:
                 print(f"   · {d}  → sudo apt-get install -y {d}")
             print("   Continuo igualment, però pot fallar el pip/npm install. Instal·la-les en una altra finestra si cal.")
+
+        # 1.5) Versions runtime: avisa si .python-version /.nvmrc / go.mod demana versió superior
+        if analysis.runtime_version_warnings:
+            print("\n⚠️  VERSIONS RUNTIME (el repo demana una versió més recent):")
+            for w in analysis.runtime_version_warnings:
+                print(f"   · {w}")
+            print("   Continuo igualment, però pot fallar. Instal·la la versió requerida si cal.")
 
         # 2) Detector de serveis 3a part (Supabase, Firebase, Auth0, etc.)
         third_party = detect_third_party_services(Path(analysis.root))
@@ -2956,10 +3858,21 @@ def main() -> int:
             time.sleep(3)  # petita espera perquè els serveis s'estabilitzin
             smoke = run_smoke_tests(emergent, analysis)
             print_smoke_report(smoke)
+        # B4: Guia post-desplegament (per a tots els stacks)
+        print(f"\n📁 Fitxer .env: {primary_env_file}")
+        if db_env_vars:
+            print("🗄️  Variables de BD injectades:")
+            for k, v in db_env_vars.items():
+                print(f"   {k}={v}")
         if emergent:
             print("\n🟢 Emergent stack iniciat:")
             print("   Backend : http://localhost:8001/api/")
             print("   Frontend: http://localhost:3000")
+            if analysis.db_provisioned:
+                for db in analysis.db_provisioned:
+                    cfg = DB_DOCKER_CONFIGS.get(db, {})
+                    if cfg:
+                        print(f"   {db}: {cfg.get('url_template', '')}")
             print(f"   Per aturar: python3 {Path(__file__).name} --stop {analysis.repo_name}")
         return 0 if not any(e for e in errors if not e.repaired) else 1
     except KeyboardInterrupt:
@@ -2967,6 +3880,11 @@ def main() -> int:
         return 130
     except Exception as e:
         err(str(e))
+        try:
+            if 'analysis' in locals() and 'workspace' in locals():
+                _execute_rollback(analysis, workspace)
+        except Exception:
+            pass
         return 1
 
 

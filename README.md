@@ -29,7 +29,10 @@ Inclou:
 | `agents/debugger.py` | Debugger intel·ligent amb KB de reparacions + Anthropic fallback |
 | `dashboard.py` | Dashboard web a `http://localhost:9999` (zero dependències) |
 | `bartolo_prompts.md` | Catàleg de prompts naturals que entén Bartolo |
+| `bartolo_init.py` | CLI interactiva per muntar repos sense flags |
+| `agents/success_kb.py` | KB d'èxits: reutilitza plans validats per stack |
 | `bench.sh` | Bateria de proves automatitzada (10 repos) |
+| `stress_test.sh` | Bateria d'estrès amb repos complexos (7 repos, detecció) |
 | `README.md` | Aquesta guia |
 
 ---
@@ -178,7 +181,36 @@ mata tots els seus subprocessos (ex. webpack-dev-server sota `yarn start`).
 
 ---
 
-## 7) Opcions completes
+## 7) CLI interactiva (`bartolo init`)
+
+```bash
+python3 bartolo_init.py
+```
+
+Guia pas a pas que et pregunta:
+1. URL o path del repo
+2. Directori de treball (default `~/universal-agent-workspace`)
+3. Analitza el stack, mostra el pla i demana confirmació
+4. Executa i mostra resultats
+
+Ideal per quan no vols recordar flags. Reutilitza l'agent per sota.
+
+---
+
+## 8) Millores de fiabilitat (v5.1)
+
+- **Pre-flight check**: comprova deps del sistema, espai lliure (>500 MB) i ports ocupats abans de generar el pla
+- **Plan B**: si un pas falla, prova alternatives predefinides (ex: `pnpm install` → `npm install`) abans d'escalar al debugger LLM
+- **KB d'èxits**: plans que han funcionat es guarden a `~/.universal-agent/success_kb.json` i es reutilitzen
+- **Rollback**: si un pas crític falla, atura processos, contenidors BD i restaura `.env` dels backups
+- **Versions runtime**: llegeix `.python-version`, `.nvmrc`, `go.mod`, `.tool-versions` i avisa si la versió instal·lada és inferior
+- **Pre-classificador**: identifica si un repo és col·lecció, documentació, llibreria, monorepo o eina abans de generar passos
+- **Smoke tests adaptatius**: endpoints canònics per framework (`/docs` per FastAPI, `/actuator/health` per Spring, `/health` per Flask...)
+- **Build + migracions**: detecta `build` a `package.json`, Prisma, Knex, Sequelize, Laravel i afegeix passos automàticament
+
+---
+
+## 9) Opcions completes
 
 | Flag | Descripció |
 |---|---|
@@ -206,7 +238,7 @@ mata tots els seus subprocessos (ex. webpack-dev-server sota `yarn start`).
 
 ---
 
-## 8) Seguretat
+## 10) Seguretat
 
 - Whitelist de prefixos permesos (`pip`, `npm`, `uvicorn`…) + suport camins com `.venv/bin/pip`
 - Whitelist de wrappers (`nohup`, `setsid`) amb validació del binari real
@@ -217,12 +249,15 @@ mata tots els seus subprocessos (ex. webpack-dev-server sota `yarn start`).
 
 ---
 
-## 9) Stacks suportats
+## 11) Stacks suportats
 
-### Detecció automàtica completa
+### Detecció automàtica completa (12 detectors)
 - **Emergent** (FastAPI+React+Mongo) — pla específic optimitzat
 - Node.js (Next, Vite, React, Express) amb npm/yarn/pnpm
 - Python (FastAPI, Flask, Django, Streamlit)
+- Deno (serveis HTTP amb `deno run`)
+- Elixir/Phoenix (`mix phx.server`)
+- .NET/ASP.NET (`dotnet run`)
 - Docker/Docker Compose
 - Go, Rust, Ruby (Rails/Sinatra), PHP (Laravel/Symfony), Java (Maven/Gradle)
 - Makefile
@@ -230,9 +265,14 @@ mata tots els seus subprocessos (ex. webpack-dev-server sota `yarn start`).
 ### BDs auto-provisionades via Docker
 - PostgreSQL 16 · MySQL 8 · **MongoDB 7** · Redis 7
 
+### Serveis cloud amb fallback local
+- Supabase → PostgreSQL local
+- MongoDB Atlas → MongoDB local
+- Detectat automàticament des del README, .env.example o codi font
+
 ---
 
-## 10) Problemes freqüents
+## 12) Problemes freqüents
 
 ### Ollama no responent
 ```bash
@@ -262,7 +302,7 @@ Si només tens `npm`, usa `npm install --legacy-peer-deps` manualment.
 
 ---
 
-## 11) Novetats v5 respecte v4
+## 13) Novetats v5 respecte v4
 
 - Detector Emergent stack (FastAPI+React+Mongo) amb `.env` auto
 - Suport **GitLab** i **Bitbucket** tokens a més de GitHub
@@ -277,7 +317,7 @@ Si només tens `npm`, usa `npm install --legacy-peer-deps` manualment.
 
 ---
 
-## 12) Exemple complet end-to-end
+## 14) Exemple complet end-to-end
 
 ```bash
 # Un cop: instal·la tot

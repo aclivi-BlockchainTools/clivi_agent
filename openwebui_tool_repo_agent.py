@@ -1,8 +1,8 @@
 """
 title: Universal Repo Agent
 author: usuari
-version: 3.0
-description: Router + wizard + exec_shell + upload. v3.0: classifica_i_resol router generalista.
+version: 3.1
+description: Router + wizard + exec_shell + upload. v3.1: estat_serveis mostra BD (contenidors Docker + URLs).
 """
 import json
 import os
@@ -228,6 +228,13 @@ class Tools:
 
         if not lines:
             return "Cap servei actiu al workspace."
+        # Afegeix info de BD si n'hi ha
+        if isinstance(ws, dict) and ws.get("_databases"):
+            lines.append("")
+            lines.append("🗄️ Bases de dades:")
+            for db in ws["_databases"]:
+                lines.append(f"   {db['type']} — {db['connection_url']}")
+                lines.append(f"   docker exec -it {db['container']} sh")
         return "\n".join(lines)
 
     def atura_repo(self, repo: str = "all") -> str:

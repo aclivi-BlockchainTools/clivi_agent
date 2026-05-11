@@ -372,6 +372,40 @@ def _workspace_services() -> Dict[str, Any]:
                 result[repo_name] = services
     except Exception as e:
         result["_error"] = str(e)
+
+    # Escaneja contenidors Docker de BD (agent-postgres, agent-mongo, etc.)
+    try:
+        r = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}} {{.Ports}}", "--filter", "name=agent-"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            from universal_repo_agent_v5 import DB_DOCKER_CONFIGS
+            databases = []
+            for line in r.stdout.strip().splitlines():
+                parts = line.strip().split(maxsplit=1)
+                if not parts:
+                    continue
+                container = parts[0]
+                ports_raw = parts[1] if len(parts) > 1 else ""
+                # Busca el tipus de BD per nom de contenidor
+                for db_type, cfg in DB_DOCKER_CONFIGS.items():
+                    if cfg.get("container") == container:
+                        port = cfg["port"]
+                        databases.append({
+                            "type": db_type,
+                            "container": container,
+                            "port": port,
+                            "connection_url": cfg.get("url_template", ""),
+                        })
+                        break
+            if databases:
+                result["_databases"] = databases
+    except FileNotFoundError:
+        pass  # Docker no instal·lat
+    except Exception:
+        pass  # Docker no disponible o error
+
     return result
 
 
@@ -926,6 +960,21 @@ def _wizard_analyze(repo_url: str) -> Dict[str, Any]:
                 seen.add(v)
                 found_secrets.append(v)
 
+        # Detecta necessitat de BD (vars d'entorn tipus MONGO_URL, DATABASE_URL, etc.)
+        _DB_ENV_PATTERNS = [
+            ("MONGO_URL", "mongodb"), ("MONGODB_URI", "mongodb"), ("MONGODB_URL", "mongodb"),
+            ("DATABASE_URL", "postgresql"),  # genèric, es refina després
+            ("POSTGRES_", "postgresql"), ("PG", "postgresql"),
+            ("MYSQL_", "mysql"), ("MARIADB_", "mysql"),
+            ("REDIS_URL", "redis"), ("REDIS_URI", "redis"), ("REDIS_HOST", "redis"),
+            ("SUPABASE", "supabase"), ("SUPABASE_URL", "supabase"),
+        ]
+        db_hints: List[str] = []
+        combined_lower = combined.lower()
+        for pattern, db_type in _DB_ENV_PATTERNS:
+            if pattern.lower() in combined_lower and db_type not in db_hints:
+                db_hints.append(db_type)
+
         # Detecta stack
         stack_parts = []
         if (root / "package.json").exists():
@@ -966,6 +1015,7 @@ def _wizard_analyze(repo_url: str) -> Dict[str, Any]:
             "secrets_needed": found_secrets,
             "has_docker_compose": (root / "docker-compose.yml").exists() or
                                    (root / "docker-compose.yaml").exists(),
+            "db_hints": db_hints,
         }
     except subprocess.TimeoutExpired:
         return {"error": "Timeout en clonar el repo (>45s). Comprova la URL."}
@@ -988,11 +1038,21 @@ def _wizard_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
     default_path = str(WORKSPACE / name)
 
     if step == "CONFIRM_PATH":
+        db_info = ""
+        if analysis.get("db_hints"):
+            from universal_repo_agent_v5 import CLOUD_TO_LOCAL
+            db_parts = []
+            for db in analysis["db_hints"]:
+                if db in CLOUD_TO_LOCAL:
+                    db_parts.append(f"{db} → {CLOUD_TO_LOCAL[db]} local")
+                else:
+                    db_parts.append(db)
+            db_info = f" | BD: {', '.join(db_parts)}"
         return {
             "step": step,
             "question": (
                 f"He analitzat el repo.\n"
-                f"Stack: {analysis.get('stack', '?')} | "
+                f"Stack: {analysis.get('stack', '?')}{db_info} | "
                 f"Secrets detectats: {len(state['pending_secrets'])}\n\n"
                 f"On el muntes?\n"
                 f"[Enter per defecte: {default_path}]"
@@ -1026,13 +1086,28 @@ def _wizard_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
         path = state["answers"].get("mount_path", default_path)
         docker = state["answers"].get("docker_pref", "auto")
         secrets_info = f"{len(secrets)} claus configurades" if secrets else "cap clau nova"
+        db_info = ""
+        if analysis.get("db_hints"):
+            from universal_repo_agent_v5 import DB_DOCKER_CONFIGS, CLOUD_TO_LOCAL
+            db_parts = []
+            for db in analysis["db_hints"]:
+                actual_db = CLOUD_TO_LOCAL.get(db, db)
+                cfg = DB_DOCKER_CONFIGS.get(actual_db, {})
+                if db in CLOUD_TO_LOCAL:
+                    db_parts.append(f"{db} → {CLOUD_TO_LOCAL[db]} (localhost:{cfg.get('port', '?')})")
+                elif cfg:
+                    db_parts.append(f"{db} (localhost:{cfg.get('port', '?')})")
+                else:
+                    db_parts.append(db)
+            db_info = f"  🗄️ BD: {', '.join(db_parts)}\n"
         return {
             "step": step,
             "question": (
                 f"Resum:\n"
                 f"  📁 Path: {path}\n"
                 f"  🔑 Secrets: {secrets_info}\n"
-                f"  🐳 Docker: {docker}\n\n"
+                f"  🐳 Docker: {docker}\n"
+                f"{db_info}\n"
                 f"Procedir? [Sí / Cancel·lar]"
             ),
             "done": False,
