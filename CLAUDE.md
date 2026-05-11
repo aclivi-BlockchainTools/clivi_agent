@@ -334,16 +334,22 @@ Implementat a:
 - `print_final_summary()`: secció `☁️ Serveis cloud` + etiqueta `supabase (→ postgresql local)`
 - Bridge wizard: `_DB_ENV_PATTERNS` inclou supabase, SUMMARY/CONFIRM_PATH mostren fallback
 
-## Problemes coneguts pendents (PRIORITAT ALTA → BAIXA)
+## Problemes coneguts pendents
 
-### 1. [BAIXA] `diagnose_error_with_model` + `ask_model_for_repair` són dues crides desconnectades
-El "debugger" actual no té memòria entre intents ni context del repo. Vegeu el patch `debugger_patch.py` que ja vam dissenyar (cal aplicar).
+Cap problema obert de prioritat alta o mitjana.
 
-### 2. [BAIXA] bench.sh no passa --non-interactive
-El mode `analyze` del bench falla repos que demanen secrets o deps del sistema
-(vite, nextjs, gradio, go-example, fastapi-mongo) per EOF en lectura interactiva.
-Resultat: 5/10 falsos negatius al bench complet. Fix: afegir `--non-interactive`
-a la crida `analyze` de bench.sh (branca `chore/bench-non-interactive`).
+### ✅ [RESOLT 2026-05-11] Debugger unificat (`IntelligentDebugger`)
+Les funcions `diagnose_error_with_model` i `ask_model_for_repair` eren dues crides
+desconnectades (sense memòria entre intents ni context del repo). Substituïdes per
+la classe `IntelligentDebugger` a `agents/debugger.py` (commit `e13df6e`):
+- `_diagnose()`: sistema de prompting amb stack, root, manifests, deps, KB markdown
+- `_repair_loop_ollama()`: conversa multi-turn amb historial complet d'intents previs
+- `_repair_with_anthropic()`: fallback a Anthropic API
+- `_kb_scan()`: cerca prèvia a la KB de reparacions
+- `_escalate()`: delega a `ErrorReporter` si s'esgoten tots els intents
+
+### ✅ [RESOLT 2026-05-11] bench.sh ja passa --non-interactive
+Ambdós modes (`analyze` i `run`) ja inclouen `--non-interactive --no-readme --no-model-refine`.
 
 ### ✅ [RESOLT 2026-05-10] 5 Millores de fiabilitat (versions runtime, pre-classificador, monorepo, smoke tests, rollback)
 
@@ -419,12 +425,6 @@ Abans dos repos Node amb `package.json` compartien pla. Ara clau tipus `repo::st
 Afegits `StandardOutput=journal` i `StandardError=journal` per tenir logs centralitzats.
 Script `start-bartolo.sh` creat per arrancar Ollama + bridge + open-webui i executar bartolo-doctor.
 Logs: `journalctl --user -u agent-bridge -f`
-
-### bench.sh no passa --non-interactive
-El mode `analyze` del bench falla repos que demanen secrets o deps del sistema
-(vite, nextjs, gradio, go-example, fastapi-mongo) per EOF en lectura interactiva.
-Resultat: 5/10 falsos negatius al bench complet. Fix: afegir `--non-interactive`
-a la crida `analyze` de bench.sh (branca `chore/bench-non-interactive`).
 
 ### is_node_library: possibles casos límit
 El scoring actual (llindar 2) és conservador. Si apareixen falsos positius (apps
