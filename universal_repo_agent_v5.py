@@ -51,7 +51,7 @@ from agents.success_kb import lookup_plan, record_success
 
 
 OLLAMA_CHAT_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")
-DEFAULT_MODEL = "qwen2.5-coder:14b"
+DEFAULT_MODEL = "qwen2.5:14b"  # model instal·lat (tool calling ✅). NOT coder:14b (no suporta tools, no instal·lat)
 DEFAULT_WORKSPACE = Path.home() / "universal-agent-workspace"
 LOG_DIRNAME = ".agent_logs"
 SERVICES_REGISTRY = ".agent_services.json"
@@ -3059,7 +3059,24 @@ def build_deterministic_plan(analysis: RepoAnalysis) -> ExecutionPlan:
             if preferred:
                 steps.append(CommandStep(id=f"make-{slugify(svc.name)}-{preferred}", title=f"make {preferred} — {svc.name}", cwd=svc.path, command=f"make {preferred}", expected_outcome=f"make {preferred} completat", category="run", critical=False))
         elif st == "deno":
-            run_cmd = "deno task start" if (svc_path / "deno.json").exists() else "deno run --allow-net main.ts"
+            # Llegeix les tasks del deno.json per trobar la millor comanda
+            run_cmd = "deno run --allow-net main.ts"  # fallback
+            deno_json_path = svc_path / "deno.json"
+            if deno_json_path.exists():
+                try:
+                    deno_cfg = json.loads(deno_json_path.read_text(errors="ignore"))
+                    tasks = deno_cfg.get("tasks", {}) if isinstance(deno_cfg, dict) else {}
+                    if tasks and isinstance(tasks, dict):
+                        # Preferim start > dev > serve > run > demo > qualsevol
+                        for preferred in ("start", "dev", "serve", "run", "demo"):
+                            if preferred in tasks:
+                                run_cmd = f"deno task {preferred}"
+                                break
+                        else:
+                            first = next(iter(tasks.keys()))
+                            run_cmd = f"deno task {first}"
+                except Exception:
+                    pass
             command, verify_port_num, verify_url = choose_service_verify(run_cmd, svc)
             steps.append(CommandStep(id=f"deno-run-{slugify(svc.name)}", title=f"Deno run — {svc.name}", cwd=svc.path, command=command, expected_outcome="Servidor Deno disponible", category="run", critical=False, verify_port=verify_port_num, verify_url=verify_url))
         elif st == "elixir":
