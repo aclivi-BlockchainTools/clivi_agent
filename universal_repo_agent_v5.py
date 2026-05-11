@@ -1384,12 +1384,12 @@ def detect_go_service(path: Path) -> Optional[ServiceInfo]:
                 pass
     return ServiceInfo(name=path.name, path=str(path), service_type="go", framework="go",
                        entry_hints=["go run ./...", "go build"], manifests=["go.mod"],
-                       confidence=0.75, run_url=f"http://localhost:{port}")
+                       ports_hint=[port], confidence=0.75, run_url=f"http://localhost:{port}")
 
 
 
 def detect_rust_service(path: Path) -> Optional[ServiceInfo]:
-    return ServiceInfo(name=path.name, path=str(path), service_type="rust", framework="rust", entry_hints=["cargo run", "cargo build --release"], manifests=["Cargo.toml"], confidence=0.75) if (path / "Cargo.toml").exists() else None
+    return ServiceInfo(name=path.name, path=str(path), service_type="rust", framework="rust", entry_hints=["cargo run", "cargo build --release"], manifests=["Cargo.toml"], ports_hint=[8080], confidence=0.75) if (path / "Cargo.toml").exists() else None
 
 
 def detect_ruby_service(path: Path) -> Optional[ServiceInfo]:
@@ -1398,7 +1398,8 @@ def detect_ruby_service(path: Path) -> Optional[ServiceInfo]:
     text = read_text(path / "Gemfile").lower()
     fw = "rails" if "rails" in text else "sinatra" if "sinatra" in text else "ruby"
     url = "http://localhost:3000" if fw in {"rails", "sinatra"} else None
-    return ServiceInfo(name=path.name, path=str(path), service_type="ruby", framework=fw, entry_hints=["bundle exec rails server", "bundle exec ruby"], manifests=["Gemfile"], confidence=0.7, run_url=url)
+    ports_hint = [3000] if fw in {"rails", "sinatra"} else []
+    return ServiceInfo(name=path.name, path=str(path), service_type="ruby", framework=fw, entry_hints=["bundle exec rails server", "bundle exec ruby"], manifests=["Gemfile"], ports_hint=ports_hint, confidence=0.7, run_url=url)
 
 
 def detect_php_service(path: Path) -> Optional[ServiceInfo]:
@@ -1406,7 +1407,7 @@ def detect_php_service(path: Path) -> Optional[ServiceInfo]:
         return None
     text = read_text(path / "composer.json").lower()
     fw = "laravel" if "laravel" in text else "symfony" if "symfony" in text else "php"
-    return ServiceInfo(name=path.name, path=str(path), service_type="php", framework=fw, entry_hints=["php artisan serve", "php -S localhost:8000"], manifests=["composer.json"], confidence=0.7, run_url="http://localhost:8000")
+    return ServiceInfo(name=path.name, path=str(path), service_type="php", framework=fw, entry_hints=["php artisan serve", "php -S localhost:8000"], manifests=["composer.json"], ports_hint=[8000], confidence=0.7, run_url="http://localhost:8000")
 
 
 def detect_java_service(path: Path) -> Optional[ServiceInfo]:
@@ -1415,7 +1416,7 @@ def detect_java_service(path: Path) -> Optional[ServiceInfo]:
         return None
     manifests = [pom.name] if pom.exists() else [gradle.name if gradle.exists() else gradk.name]
     entry_hint = "mvn spring-boot:run" if pom.exists() else "./gradlew bootRun"
-    return ServiceInfo(name=path.name, path=str(path), service_type="java", framework="spring", entry_hints=[entry_hint], manifests=manifests, confidence=0.7, run_url="http://localhost:8080")
+    return ServiceInfo(name=path.name, path=str(path), service_type="java", framework="spring", entry_hints=[entry_hint], manifests=manifests, ports_hint=[8080], confidence=0.7, run_url="http://localhost:8080")
 
 
 def detect_makefile_service(path: Path) -> Optional[ServiceInfo]:
@@ -1424,7 +1425,7 @@ def detect_makefile_service(path: Path) -> Optional[ServiceInfo]:
         return None
     targets = re.findall(r"^([a-zA-Z][a-zA-Z0-9_-]+)\s*:", read_text(makefile), re.MULTILINE)
     useful = [t for t in targets if t in {"run", "start", "dev", "serve", "up", "build", "install", "all", "setup"}]
-    return ServiceInfo(name=path.name, path=str(path), service_type="make", framework="make", entry_hints=useful or targets[:5], manifests=["Makefile"], confidence=0.6)
+    return ServiceInfo(name=path.name, path=str(path), service_type="make", framework="make", entry_hints=useful or targets[:5], manifests=["Makefile"], ports_hint=[], confidence=0.6)
 
 
 def detect_monorepo_tool(path: Path) -> Optional[str]:
@@ -1500,8 +1501,8 @@ def detect_deno_service(path: Path) -> Optional[ServiceInfo]:
                 entry_hints[0] = f"deno run -A {candidate}"
                 break
     return ServiceInfo(name=path.name, path=str(path), service_type="deno", framework="deno",
-                       entry_hints=entry_hints,
-                       manifests=manifests, confidence=0.65 if has_manifest else 0.4,
+                       entry_hints=entry_hints, manifests=manifests,
+                       ports_hint=ports, confidence=0.65 if has_manifest else 0.4,
                        run_url=run_url)
 
 
@@ -1519,7 +1520,7 @@ def detect_elixir_service(path: Path) -> Optional[ServiceInfo]:
     run_url = f"http://localhost:{ports[0]}" if ports else "http://localhost:4000" if fw == "phoenix" else None
     return ServiceInfo(name=path.name, path=str(path), service_type="elixir", framework=fw,
                        entry_hints=["mix phx.server" if fw == "phoenix" else "mix run --no-halt"],
-                       manifests=["mix.exs"], confidence=0.75, run_url=run_url)
+                       manifests=["mix.exs"], ports_hint=ports, confidence=0.75, run_url=run_url)
 
 
 def detect_dotnet_service(path: Path) -> Optional[ServiceInfo]:
@@ -1543,7 +1544,7 @@ def detect_dotnet_service(path: Path) -> Optional[ServiceInfo]:
     run_url = f"http://localhost:{ports[0]}" if ports else "http://localhost:5000" if is_web else None
     return ServiceInfo(name=path.name, path=str(path), service_type="dotnet", framework=fw,
                        entry_hints=["dotnet run", "dotnet watch run"],
-                       manifests=manifests, confidence=0.7, run_url=run_url)
+                       manifests=manifests, ports_hint=ports, confidence=0.7, run_url=run_url)
 
 
 ALL_DETECTORS = [detect_node_service, detect_python_service, detect_docker_service, detect_go_service, detect_rust_service, detect_ruby_service, detect_php_service, detect_java_service, detect_makefile_service, detect_deno_service, detect_elixir_service, detect_dotnet_service]
