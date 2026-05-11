@@ -204,8 +204,10 @@ class Tools:
     # ---------- agent: gestió de serveis ----------
     def estat_serveis(self) -> str:
         """
-        Mostra tots els serveis i repos en execució al sistema.
-        Inclou serveis arrencats via start.sh (wavebox-mail, etc.) i via l'agent.
+        Mostra tots els serveis, repos i bases de dades en execució al sistema.
+        Utilitza aquesta funció per respondre preguntes sobre: quins serveis estan
+        arrencats, què està corrent, quines bases de dades hi ha actives, estat
+        del sistema, serveis disponibles. Inclou PostgreSQL, MySQL, Redis, MongoDB.
         """
         ws = self._get("/workspace/services", timeout=15)
         ag = self._get("/status", timeout=15)
@@ -214,6 +216,8 @@ class Tools:
         # Serveis workspace (start.sh)
         if ws and not ws.get("error") and not ws.get("_error"):
             for repo, svcs in ws.items():
+                if repo.startswith("_"):
+                    continue
                 running = [s for s, info in svcs.items() if info.get("running")]
                 stopped = [s for s, info in svcs.items() if not info.get("running")]
                 status = "✅" if running else "❌"
