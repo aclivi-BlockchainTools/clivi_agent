@@ -133,6 +133,7 @@ DB_DOCKER_CONFIGS: Dict[str, Dict[str, Any]] = {
         "port": 5432,
         "env_vars": {"POSTGRES_USER": "agentuser", "POSTGRES_PASSWORD": "agentpass", "POSTGRES_DB": "agentdb"},
         "url_env": "DATABASE_URL",
+        "alt_url_envs": ["POSTGRES_URL", "POSTGRESQL_URL", "PG_URL", "SQLALCHEMY_DATABASE_URI", "DATABASE_URI"],
         "url_template": "postgresql://agentuser:agentpass@localhost:5432/agentdb",
     },
     "mysql": {
@@ -141,6 +142,7 @@ DB_DOCKER_CONFIGS: Dict[str, Dict[str, Any]] = {
         "port": 3306,
         "env_vars": {"MYSQL_ROOT_PASSWORD": "agentpass", "MYSQL_DATABASE": "agentdb", "MYSQL_USER": "agentuser", "MYSQL_PASSWORD": "agentpass"},
         "url_env": "DATABASE_URL",
+        "alt_url_envs": ["MYSQL_URL", "MYSQL_URI", "SQLALCHEMY_DATABASE_URI", "DATABASE_URI"],
         "url_template": "mysql://agentuser:agentpass@localhost:3306/agentdb",
     },
     "mongodb": {
@@ -149,6 +151,7 @@ DB_DOCKER_CONFIGS: Dict[str, Dict[str, Any]] = {
         "port": 27017,
         "env_vars": {},
         "url_env": "MONGO_URL",
+        "alt_url_envs": ["MONGODB_URL", "MONGODB_URI", "MONGO_URI", "MONGODB_CONNECTION_STRING"],
         "url_template": "mongodb://localhost:27017/agentdb",
     },
     "redis": {
@@ -157,6 +160,7 @@ DB_DOCKER_CONFIGS: Dict[str, Dict[str, Any]] = {
         "port": 6379,
         "env_vars": {},
         "url_env": "REDIS_URL",
+        "alt_url_envs": ["REDIS_URI", "REDISCLOUD_URL", "REDIS_TLS_URL"],
         "url_template": "redis://localhost:6379",
     },
 }
@@ -187,7 +191,7 @@ SKIP_DIRS = {
 DB_HINT_PATTERNS: Dict[str, Sequence[str]] = {
     "postgresql": [r"DATABASE_URL", r"POSTGRES", r"psycopg", r"asyncpg", r"sqlalchemy.*postgres", r"postgresql://"],
     "mysql": [r"MYSQL", r"pymysql", r"mysqlclient", r"mysql://"],
-    "mongodb": [r"MONGO_URL", r"MONGODB_URI", r"pymongo", r"motor\.motor_asyncio", r"mongodb://"],
+    "mongodb": [r"MONGO_URL", r"MONGODB_URL", r"MONGODB_URI", r"MONGO_URI", r"pymongo", r"motor\.motor_asyncio", r"mongodb://"],
     "redis": [r"REDIS_URL", r"redis\.Redis", r"import redis", r"redis://"],
     "supabase": [r"SUPABASE", r"supabase"],
 }
@@ -682,7 +686,8 @@ def maybe_background_command(command: str, log_rel: str = ".agent_last_run.log")
             i += 1
         rest = " ".join(shlex.quote(t) if " " in t else t for t in tokens[i:])
         env_prefix = (" ".join(env_assigns) + " ") if env_assigns else ""
-        wrapped = f"{env_prefix}setsid nohup {rest} > {log_rel} 2>&1 < /dev/null & echo __AGENT_PID__=$!"
+        dotenv_load = "test -f .env && export $(grep -v '^#' .env | grep -v '^$' | xargs); "
+        wrapped = f"{env_prefix}{dotenv_load}setsid nohup {rest} > {log_rel} 2>&1 < /dev/null & echo __AGENT_PID__=$!"
         return wrapped, True
     return command, False
 
@@ -937,6 +942,8 @@ def build_db_provision_steps(db_hints: List[str]) -> Tuple[List[CommandStep], Di
         display_name = f"{db_key} → {actual_db}" if db_key != actual_db else db_key
         steps.append(CommandStep(id=f"db-provision-{db_key}", title=f"Provisió automàtica de {display_name.upper()} (Docker)", cwd="/tmp", command=command, expected_outcome=f"Contenidor {actual_db} en execució al port {port}", critical=False, category="db", verify_port=port))
         env_vars[cfg["url_env"]] = cfg["url_template"]
+        for alt_name in cfg.get("alt_url_envs", []):
+            env_vars[alt_name] = cfg["url_template"]
         env_vars.update(cfg["env_vars"])
     return steps, env_vars
 
