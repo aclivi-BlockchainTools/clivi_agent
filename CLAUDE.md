@@ -14,9 +14,9 @@ L'usuari final coneix el sistema com **"Bartolo"** (el nom del model d'OpenWebUI
                                               dashboard.py :9999 (control alternatiu sense LLM)
 ```
 
-- **OpenWebUI**: xat amb Qwen2.5-coder:14b via Ollama, function calling nadiu
+- **OpenWebUI**: xat amb Qwen2.5:14b via Ollama, function calling nadiu
 - **Bridge HTTP** (`agent_http_bridge.py`): exposa l'agent com REST API al port 9090
-- **Agent CLI** (`universal_repo_agent_v5.py`): el cervell — 3892 línies, validator + planner + executor + preflight + plan B + success KB + 12 detectors
+- **Agent CLI** (`universal_repo_agent_v5.py`): el cervell — 4060 línies, validator + planner + executor + preflight + plan B + success KB + 12 detectors
 - **Dashboard** (`dashboard.py`): UI web a 9999, sense dependències extra
 - **Tool OpenWebUI** (`openwebui_tool_repo_agent.py`): client Python pur (urllib) que el container OpenWebUI carrega
 
@@ -24,18 +24,18 @@ L'usuari final coneix el sistema com **"Bartolo"** (el nom del model d'OpenWebUI
 
 | Fitxer | Què fa | Línies |
 |---|---|---|
-| `universal_repo_agent_v5.py` | Agent CLI, cor del sistema | 3892 |
+| `universal_repo_agent_v5.py` | Agent CLI, cor del sistema | 4060 |
 | `agent_http_bridge.py` | REST API al port 9090, jobs async, shell exec amb token, upload ZIP, wizard, router dispatch | 1408 |
-| `openwebui_tool_repo_agent.py` | Tool per OpenWebUI (v2.3, 10 funcions) | 403 |
+| `openwebui_tool_repo_agent.py` | Tool per OpenWebUI (v2.4, 10 funcions) | 403 |
 | `openwebui_tool_web_search.py` | Tool DuckDuckGo per cerques | 112 |
-| `bartolo_router.py` | Classificador d'intencions L1 (regex) + L2 (LLM) — 8 intents | 252 |
+| `bartolo_router.py` | Classificador d'intencions L1 (regex) + L2 (LLM) — 8 intents | 253 |
 | `bartolo_init.py` | CLI interactiva per muntar repos sense flags (reutilitza l'agent) | 168 |
 | `agents/success_kb.py` | Registre de plans que han funcionat per stack (KB d'èxits) | 83 |
-| `agents/debugger.py` | Debugger intel·ligent amb KB de reparacions + Anthropic fallback | — |
+| `agents/debugger.py` | Debugger intel·ligent amb KB de reparacions + Anthropic fallback | 670 |
 | `dashboard.py` | UI web :9999 | 254 |
-| `bench.sh` | Bateria de proves automatitzada (10 repos) | 83 |
-| `stress_test.sh` | Bateria d'estrès amb repos complexos (7 repos, detecció) | 85 |
-| `setup_ubuntu.sh` | Instal·lador Node/Docker/Ollama/qwen2.5-coder:14b | 190 |
+| `bench.sh` | Bateria de proves automatitzada (11 repos complets, 6 quick) | 85 |
+| `stress_test.sh` | Bateria d'estrès amb repos complexos (7 repos, detecció) | 110 |
+| `setup_ubuntu.sh` | Instal·lador Node/Docker/Ollama/qwen2.5:14b | 190 |
 | `bartolo_prompts.md` | Catàleg de prompts naturals que entén Bartolo | 131 |
 | `INFORME_BATERIA.md` | Resultats de la bateria amb taxes d'èxit per stack | 101 |
 
@@ -134,7 +134,66 @@ else:
 "
 ```
 
+## Taxa d'èxit actual
+
+Bench quick: **6/6 (100%)** — 2 execucions reals (streamlit-example, node-js-sample), 4 deteccions (flask, express, fastapi, django).
+Bench complet: **11/11 (100%)**.
+
+Taxa d'èxit realista per a repos nous ben estructurats: **~80-85%**.
+Els fallos típics són repos molt antics amb dependències trencades o monorepos complexos.
+
 ## Problemes resolts
+
+### ✅ [RESOLT 2026-05-11] v5.2 — 7 fixes de fiabilitat (aquesta sessió)
+
+**F1 — Docker health check timeout:**
+`build_db_provision_steps()` feia 30×2s = 60s de health check, insuficient per
+primer pull d'imatge + init de PostgreSQL. **Fix:** `sleep 3` inicial + 90×2s = 183s màx.
+
+**F2 — LLM repair "No closing quotation":**
+qwen2.5 generava text conversacional amb cometes desbalancejades al camp `command`
+→ `shlex.split()` petava amb ValueError. **Fix:** `_extract_bash_command()` neteja
+prefixos conversacionals (català i anglès), `_sanitize_quotes()` elimina cometes
+senars, system prompt reforçat amb `_BASH_ONLY_INSTRUCTION`.
+
+**F3 — Port conflict resolution per a tots els stacks:**
+`choose_service_verify()` només injectava `PORT=` per a `node` i `python`.
+**Fix:** suport per a tots els stacks: `deno`, `elixir`, `dotnet`, `go`, `ruby`,
+`php`, `java` + fallback genèric `PORT={free_port}`. Amb flags específics per
+framework (`--port`, `--urls`, `-Dserver.port`, `ASPNETCORE_URLS`...).
+
+**F4 — Background service markers per a tots els stacks:**
+`maybe_background_command()` només reconeixia `npm/yarn/uvicorn/streamlit/rails...`.
+Sense `deno run` o `dotnet run`, els serveis es quedaven bloquejats en foreground.
+**Fix:** afegits `deno run`, `deno task`, `dotnet run`, `dotnet watch`,
+`mix phx.server`, `mix run`, `bundle exec`.
+
+**F5 — Deno detection sense manifest:**
+`detect_deno_service()` requeria `deno.json` o `deno.jsonc`. Repos com
+`deno-rest-greet` (només `server.ts` amb imports `npm:`/`jsr:`) no es detectaven.
+**Fix:** escaneja `.ts` buscant `from "npm:"` / `from "jsr:"`, llegeix el port
+real del codi font, tria el millor entry point (`server.ts`, `main.ts`...).
+
+**F6 — Pre-flight check cec per 10/12 stacks:**
+Només `detect_node_service` i `detect_docker_service` passaven `ports_hint` al
+`ServiceInfo`. `preflight_check()` no veia els ports de la resta d'stacks i no
+avisava de conflictes. **Fix:** tots 12 detectors passen `ports_hint`.
+
+**F7 — `fuser` rebutjat pel validador:**
+El debugger suggeria `fuser -k 3000/tcp` per alliberar ports però `fuser` no
+era a `SAFE_COMMAND_PREFIXES`. **Fix:** afegit.
+
+### ✅ [RESOLT 2026-05-11] v5.2 — Deno `-A` (allow-all)
+Default Deno run de `--allow-net` a `-A` (allow-all) per auto-deployment robust.
+La majoria d'apps Deno necessiten read + env + net com a mínim.
+
+### ✅ [RESOLT 2026-05-11] v5.2 — Docker compose auto-detecció
+Nova funció `get_docker_compose_cmd()` que detecta `docker compose` (plugin) vs
+`docker-compose` (standalone). Totes les referències hardcodejades substituïdes.
+
+### ✅ [RESOLT 2026-05-11] v5.2 — sudo amb contrasenya
+`_install_system_dep()` usa `getpass.getpass()` + `sudo -S` per instal·lar
+dependències del sistema amb contrasenya. Suporta mode `--non-interactive`.
 
 ### ✅ [RESOLT 2026-04-26] Fix #1 — Tool 2.3 NO enviava X-Auth-Token
 `openwebui_tool_repo_agent.py` llegeix `BRIDGE_AUTH_TOKEN` des de l'entorn i l'afegeix
@@ -296,7 +355,7 @@ Fitxers de monorepo afegits a `discover_candidate_dirs()`.
 
 **E2 — Nous detectors de stacks:**
 3 detectors nous a `ALL_DETECTORS` (12 total):
-- `detect_deno_service()`: `deno.json`, `deno.jsonc`, `import_map.json`
+- `detect_deno_service()`: `deno.json`, `deno.jsonc`, `import_map.json` + fallback a `.ts` amb imports Deno
 - `detect_elixir_service()`: `mix.exs` (detecta Phoenix vs Elixir genèric)
 - `detect_dotnet_service()`: `*.csproj`, `*.fsproj`, `*.sln` (detecta ASP.NET vs genèric)
 Amb passos d'instal·lació i execució a `build_deterministic_plan()`.
@@ -327,16 +386,6 @@ resol automàticament a l'alternativa local via Docker. L'usuari veu:
 - Al `print_final_summary()`: "☁️ Supabase detectat → PostgreSQL local"
 - Al wizard: "BD: supabase → postgresql local"
 - Per canviar a cloud: definir les vars d'entorn reals al `.env`
-
-Implementat a:
-- `analyze_repo()`: detecta cloud → afegeix local fallback a `db_hints`, guarda a `cloud_services`
-- `build_db_provision_steps()`: resol cloud → local abans de provisionar
-- `print_final_summary()`: secció `☁️ Serveis cloud` + etiqueta `supabase (→ postgresql local)`
-- Bridge wizard: `_DB_ENV_PATTERNS` inclou supabase, SUMMARY/CONFIRM_PATH mostren fallback
-
-## Problemes coneguts pendents
-
-Cap problema obert de prioritat alta o mitjana.
 
 ### ✅ [RESOLT 2026-05-11] Debugger unificat (`IntelligentDebugger`)
 Les funcions `diagnose_error_with_model` i `ask_model_for_repair` eren dues crides
@@ -375,8 +424,7 @@ falla, `_execute_rollback()` atura processos, contenidors BD i restaura `.env` d
 
 **Tool detection:** `_TOOL_REPO_NAMES` (turborepo, deno, lerna, phoenix, nx) i `_TOOL_MARKER_FILES`
 (turbo.json, pnpm-workspace.yaml, lerna.json). `classify_repo_type()` retorna `"tool"` per tools
-i `analyze_repo()` salta la detecció de serveis. Impacte: turborepo 15→0 serveis, deno 59→0,
-phoenix 4→0, lerna 2→0.
+i `analyze_repo()` salta la detecció de serveis.
 
 **Auto-install runtimes:** `_install_system_dep()` instal·la automàticament deps amb
 `--approve-all`. Nous runtimes a `SYSTEM_DEPS`: deno, elixir, mix. pnpm/yarn usen `corepack`.
@@ -394,29 +442,33 @@ Ara `node-js-sample::node/npm` i `mantine::node/npm` són entrades separades.
 ### ✅ [RESOLT 2026-05-11] Build + Migracions + DB Health
 
 **Build step Node:** `build_deterministic_plan()` detecta `"build"` a `package.json` scripts
-i afegeix pas `pnpm build`/`yarn build`/`npm run build` entre install i run. Next.js sense
-script build → `npx next build`.
+i afegeix pas `pnpm build`/`yarn build`/`npm run build` entre install i run.
 
 **Migrations Node/PHP:** Prisma (`prisma/schema.prisma` → `npx prisma migrate deploy`),
 Knex (`knexfile.js` → `npx knex migrate:latest`), Sequelize (`.sequelizerc` →
 `npx sequelize-cli db:migrate`), Laravel (`php artisan migrate --force`).
-Categoria `"migrate"` ordena 1 (després d'install=0, abans de run=4). `critical=False`.
 
 **DB Health + ordre:** `"db": -1` a `_CATEGORY_ORDER` (contenidors s'arrenquen primer).
-`verify_step` activat per `category in ("run", "db")`. Health check `nc -z` inline al
-`docker run` (fins a 30 intents de 2s). Rollback atura contenidors en cas d'error.
-
-**pnpm/yarn sense sudo:** `npm install -g pnpm --prefix ~/.local` (no requereix password).
-
-**KB d'èxits:** `_stack_key()` a `agents/success_kb.py` inclou `repo_name` a la clau hash.
-Abans dos repos Node amb `package.json` compartien pla. Ara clau tipus `repo::stack`.
+`verify_step` activat per `category in ("run", "db")`. Health check `nc -z` amb
+`sleep 3` + 90 intents de 2s (183s màx). Rollback atura contenidors en cas d'error.
 
 ### ✅ [RESOLT 2026-05-10] bartolo-doctor.sh: 2 bugs menors
-1. **Pas 2 — `/proc/PID/environ` Permission denied:** El codi ja ho gestiona correctament
-   (`2>/dev/null` + fallback a token buit + missatge informatiu). No cal canvi.
-2. **Pas 7 — `docker port` parsing fràgil amb IPv6:** `head -1 | cut -d: -f2` trencava si
-   la línia IPv6 (`[::]:3000`) sortia primer. **Fix:** `grep -oP '0\.0\.0\.0:\K\d+'` per
+1. **Pas 2 — `/proc/PID/environ` Permission denied:** El codi ja ho gestiona correctament.
+2. **Pas 7 — `docker port` parsing fràgil amb IPv6:** `grep -oP '0\.0\.0\.0:\K\d+'` per
    extreure només el port de la línia IPv4.
+
+## Problemes coneguts pendents
+
+Cap problema obert de prioritat alta o mitjana.
+
+### Limitacions conegudes (no bugs, sinó restriccions de disseny)
+
+- **Elixir/Phoenix**: problemes de compilació amb dependències antigues (ex: `jose`) en versions modernes d'Elixir. No és un bug de l'agent sinó incompatibilitat upstream.
+- **.NET**: detector implementat però no provat E2E (SDK no instal·lat al sistema).
+- **Monorepos**: detecció OK, però l'execució completa no s'ha validat amb casos reals.
+- **Debugger Anthropic fallback**: requereix API key configurada. Sense ella, només Ollama.
+- **`choose_service_verify`**: ajusta la URL de verificació i afegeix `PORT=` a la comanda, però si l'app ignora `PORT=` i usa un port hardcodejat, el smoke test fallarà.
+- **is_node_library**: el scoring actual (llindar 2) és conservador. Poden aparèixer falsos positius/negatius.
 
 ## Millores futures descobertes
 
@@ -425,11 +477,6 @@ Abans dos repos Node amb `package.json` compartien pla. Ara clau tipus `repo::st
 Afegits `StandardOutput=journal` i `StandardError=journal` per tenir logs centralitzats.
 Script `start-bartolo.sh` creat per arrancar Ollama + bridge + open-webui i executar bartolo-doctor.
 Logs: `journalctl --user -u agent-bridge -f`
-
-### is_node_library: possibles casos límit
-El scoring actual (llindar 2) és conservador. Si apareixen falsos positius (apps
-marcades com library) o falsos negatius (libs que passen), ajustar els pesos a
-`is_node_library()` i afegir casos a `test_node_library_detection.py`.
 
 ## Convencions de codi descobertes
 
@@ -443,7 +490,7 @@ Fitxers `test_<nom>.py` al root del projecte. Execució: `python3 test_<nom>.py`
 Cap framework extern — `sys.exit(1)` si hi ha fallades. Exemple: `test_node_library_detection.py`.
 
 ### Backups `.bak_<motiu>` abans d'editar fitxers grans
-Abans d'editar `universal_repo_agent_v5.py` (3287 línies), crear còpia amb
+Abans d'editar `universal_repo_agent_v5.py` (4060 línies), crear còpia amb
 `cp universal_repo_agent_v5.py universal_repo_agent_v5.py.bak_<motiu>`.
 Permet revertir manualment si cal sense dependre de git.
 
@@ -457,8 +504,8 @@ git checkout -b fix/<nom-curt>
 # (Claude Code edita aquí)
 
 # 3. Test ràpid amb bench.sh
-./bench.sh quick   # mode ràpid: 5 repos, ~10 minuts
-./bench.sh         # mode complet: 10 repos, ~30 minuts
+./bench.sh quick   # mode ràpid: 6 repos, ~1.5 minuts
+./bench.sh         # mode complet: 11 repos, ~5 minuts
 
 # 4. Si tot OK
 git add -A && git commit -m "..."

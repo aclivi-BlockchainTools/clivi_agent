@@ -1,8 +1,8 @@
 # Universal Repo Agent v5 — Guia en català
 
 Un agent Python que clona, analitza i arrenca repositoris de GitHub/GitLab/Bitbucket
-a la teva màquina Ubuntu, utilitzant **Ollama** + **qwen2.5-coder:14b** per refinar
-el pla d'execució i diagnosticar errors.
+a la teva màquina Ubuntu, utilitzant **Ollama** + **qwen2.5:14b** per refinar
+el pla d'execució i diagnosticar errors. L'usuari final el coneix com **"Bartolo"**.
 
 Inclou:
 - 🟢 Detector específic per **repositoris d'Emergent** (FastAPI + React + MongoDB)
@@ -11,7 +11,8 @@ Inclou:
 - 🧪 **Smoke tests automàtics** després d'arrencar (HTTP + pytest)
 - 🎨 **Dashboard web** (`dashboard.py`) per veure i controlar repos via navegador
 - 🧭 **Router d'intencions** (`bartolo_router.py`) L1 (regex) + L2 (LLM petit) per classificar peticions en llenguatge natural
-- 🔧 **Debugger intel·ligent** (`agents/debugger.py`) amb KB persistent de reparacions + fallback a Anthropic
+- 🔧 **Debugger intel·ligent** (`agents/debugger.py`) amb KB persistent de reparacions + multi-turn Ollama + fallback a Anthropic
+- 🚀 **Auto-resolució de conflictes de ports** — detecta ports ocupats i re-assigna automàticament per a tots els stacks
 
 ---
 
@@ -19,19 +20,19 @@ Inclou:
 
 | Fitxer | Descripció |
 |---|---|
-| `openwebui_tool_repo_agent.py` | Tool per OpenWebUI: activar l'agent via xat |
+| `universal_repo_agent_v5.py` | Agent CLI, cor del sistema (4060 línies) |
+| `agent_http_bridge.py` | Bridge HTTP (API REST al :9090) amb wizard, router dispatch, jobs async (1408 línies) |
+| `openwebui_tool_repo_agent.py` | Tool per OpenWebUI: activar l'agent via xat (403 línies) |
 | `openwebui_tool_web_search.py` | Tool per OpenWebUI: cerca a Internet via DuckDuckGo |
 | `OPENWEBUI_SETUP.md` | Guia d'integració amb OpenWebUI (routing automàtic) |
 | `setup_ubuntu.sh` | Script d'instal·lació de totes les dependències a Ubuntu |
-| `universal_repo_agent_v5.py` | L'agent CLI |
-| `agent_http_bridge.py` | Bridge HTTP (API REST al :9090) amb wizard, router dispatch, jobs async |
-| `bartolo_router.py` | Classificador d'intencions L1 (regex) + L2 (LLM) — 8 intents, 0ms L1 |
-| `agents/debugger.py` | Debugger intel·ligent amb KB de reparacions + Anthropic fallback |
+| `bartolo_router.py` | Classificador d'intencions L1 (regex) + L2 (LLM) — 8 intents, 0ms L1 (253 línies) |
+| `bartolo_init.py` | CLI interactiva per muntar repos sense flags (168 línies) |
+| `agents/debugger.py` | Debugger intel·ligent amb KB de reparacions + Anthropic fallback (670 línies) |
+| `agents/success_kb.py` | KB d'èxits: reutilitza plans validats per stack (83 línies) |
 | `dashboard.py` | Dashboard web a `http://localhost:9999` (zero dependències) |
 | `bartolo_prompts.md` | Catàleg de prompts naturals que entén Bartolo |
-| `bartolo_init.py` | CLI interactiva per muntar repos sense flags |
-| `agents/success_kb.py` | KB d'èxits: reutilitza plans validats per stack |
-| `bench.sh` | Bateria de proves automatitzada (10 repos) |
+| `bench.sh` | Bateria de proves automatitzada (11 repos) |
 | `stress_test.sh` | Bateria d'estrès amb repos complexos (7 repos, detecció) |
 | `README.md` | Aquesta guia |
 
@@ -52,7 +53,7 @@ Instal·la:
 - Paquets base (`git`, `curl`, `python3`, `python3-venv`, `build-essential`, …)
 - **Node.js 20 LTS** + **Yarn** (via corepack)
 - **Docker Engine** + Compose (per aixecar BDs i pel mode `--dockerize`)
-- **Ollama** + `qwen2.5-coder:14b` (~8–9 GB)
+- **Ollama** + `qwen2.5:14b` (~8–9 GB)
 - Python `requests`
 
 Després d'instal·lar Docker, **tanca i torna a obrir sessió** (o `newgrp docker`).
@@ -197,7 +198,32 @@ Ideal per quan no vols recordar flags. Reutilitza l'agent per sota.
 
 ---
 
-## 8) Millores de fiabilitat (v5.1)
+## 8) Millores v5.2 — Fiabilitat i resolució de ports (2026-05-11)
+
+- **Resolució de conflictes de ports per a tots els stacks**: abans només `node` i `python`
+  rebien `PORT=` automàtic. Ara `deno`, `elixir`, `dotnet`, `go`, `ruby`, `php`, `java`
+  tenen suport complet amb flags específics per framework (`--port`, `--urls`,
+  `-Dserver.port`, `ASPNETCORE_URLS`...).
+- **Pre-flight check amb ports per a tots els stacks**: els 12 detectors passen `ports_hint`,
+  el `preflight_check()` detecta ports ocupats abans d'executar.
+- **Background automàtic per a tots els serveis**: `deno run`, `dotnet run`, `mix phx.server`,
+  `mix run`, `bundle exec` afegits a `maybe_background_command`.
+- **Docker health check millorat**: `sleep 3` + 90×2s (183s màx) per suportar
+  primers pulls d'imatge i inicialització lenta de PostgreSQL.
+- **Debugger LLM més robust**: neteja de text conversacional i cometes desbalancejades
+  de les respostes de qwen2.5. Sistema de prompting reforçat.
+- **Deno detection millorada**: detecta projectes Deno sense `deno.json` escanejant
+  imports `npm:`/`jsr:` als fitxers `.ts`. Llegeix el port real del codi font.
+  Default `deno run -A` (allow-all) per auto-deployment.
+- **Auto-instal·lació amb sudo**: `_install_system_dep()` demana la contrasenya
+  amb `getpass` i usa `sudo -S`. Suporta mode `--non-interactive`.
+- **Docker compose auto-detecció**: `get_docker_compose_cmd()` detecta
+  `docker compose` (plugin) vs `docker-compose` (standalone).
+- **`fuser` afegit a comandes segures** per diagnòstic de ports.
+
+---
+
+## 9) Millores de fiabilitat (v5.1)
 
 - **Pre-flight check**: comprova deps del sistema, espai lliure (>500 MB) i ports ocupats abans de generar el pla
 - **Plan B**: si un pas falla, prova alternatives predefinides (ex: `pnpm install` → `npm install`) abans d'escalar al debugger LLM
@@ -207,27 +233,28 @@ Ideal per quan no vols recordar flags. Reutilitza l'agent per sota.
 - **Pre-classificador**: identifica si un repo és col·lecció, documentació, llibreria, monorepo o eina abans de generar passos
 - **Smoke tests adaptatius**: endpoints canònics per framework (`/docs` per FastAPI, `/actuator/health` per Spring, `/health` per Flask...)
 - **Build + migracions**: detecta `build` a `package.json`, Prisma, Knex, Sequelize, Laravel i afegeix passos automàticament
+- **Debugger intel·ligent**: diagnosi + reparació multi-turn amb Ollama, fallback a Anthropic API, KB de reparacions persistent
 
 ---
 
-## 9) Opcions completes
+## 10) Opcions completes
 
 | Flag | Descripció |
 |---|---|
 | `--input <URL\|carpeta\|zip>` | Font del repositori |
 | `--workspace <path>` | Per defecte `~/universal-agent-workspace` |
-| `--model <nom>` | Model Ollama. Per defecte `qwen2.5-coder:14b` |
+| `--model <nom>` | Model Ollama. Per defecte `qwen2.5:14b` |
 | `--execute` | Executa el pla |
 | `--approve-all` | No demana confirmació pas a pas |
 | `--dry-run` | Mostra el pla, no executa |
-| `--dockerize` | **NOU** — Mode Docker Compose (tot en contenidors) |
-| `--no-smoke` | **NOU** — Salta els smoke tests |
-| `--non-interactive` | **NOU** — No demana inputs (secrets no trobats → buits) |
+| `--dockerize` | Mode Docker Compose (tot en contenidors) |
+| `--no-smoke` | Salta els smoke tests |
+| `--non-interactive` | No demana inputs (secrets no trobats → buits) |
 | `--no-model-refine` | No refinis el pla amb LLM |
 | `--no-readme` | No llegeixis el README |
 | `--no-db-provision` | No aixequis BDs amb Docker |
 | `--no-emergent-detect` | Desactiva detector Emergent |
-| `--llm-primary` | **v6 NOU** — L'LLM llegeix el repo i proposa el pla des de zero (fallback determinista si falla). Millor per repos desordenats. |
+| `--llm-primary` | L'LLM llegeix el repo i proposa el pla des de zero (fallback determinista si falla) |
 | `--skip-env` | No facis configuració interactiva de .env |
 | `--github-token <t>` | Token GitHub (també env `GITHUB_TOKEN`) |
 | `--gitlab-token <t>` | Token GitLab (també env `GITLAB_TOKEN`) |
@@ -238,7 +265,7 @@ Ideal per quan no vols recordar flags. Reutilitza l'agent per sota.
 
 ---
 
-## 10) Seguretat
+## 11) Seguretat
 
 - Whitelist de prefixos permesos (`pip`, `npm`, `uvicorn`…) + suport camins com `.venv/bin/pip`
 - Whitelist de wrappers (`nohup`, `setsid`) amb validació del binari real
@@ -249,13 +276,13 @@ Ideal per quan no vols recordar flags. Reutilitza l'agent per sota.
 
 ---
 
-## 11) Stacks suportats
+## 12) Stacks suportats
 
 ### Detecció automàtica completa (12 detectors)
 - **Emergent** (FastAPI+React+Mongo) — pla específic optimitzat
 - Node.js (Next, Vite, React, Express) amb npm/yarn/pnpm
 - Python (FastAPI, Flask, Django, Streamlit)
-- Deno (serveis HTTP amb `deno run`)
+- Deno (HTTP amb `deno run` o `deno task`, amb o sense `deno.json`)
 - Elixir/Phoenix (`mix phx.server`)
 - .NET/ASP.NET (`dotnet run`)
 - Docker/Docker Compose
@@ -264,6 +291,7 @@ Ideal per quan no vols recordar flags. Reutilitza l'agent per sota.
 
 ### BDs auto-provisionades via Docker
 - PostgreSQL 16 · MySQL 8 · **MongoDB 7** · Redis 7
+- Health check: `sleep 3` + 90 intents de 2s (183s) per suportar primer pull d'imatge
 
 ### Serveis cloud amb fallback local
 - Supabase → PostgreSQL local
@@ -272,7 +300,7 @@ Ideal per quan no vols recordar flags. Reutilitza l'agent per sota.
 
 ---
 
-## 12) Problemes freqüents
+## 13) Problemes freqüents
 
 ### Ollama no responent
 ```bash
@@ -284,15 +312,16 @@ curl http://localhost:11434/api/tags
 `newgrp docker` o tanca sessió i torna a obrir.
 
 ### Ports ocupats
-L'agent intenta port lliure automàticament. Si vols forçar:
+L'agent detecta ports ocupats al pre-flight check i re-assigna automàticament
+amb `PORT=<port_lliure>` o flags específics del framework. Si vols forçar manualment:
 ```bash
-lsof -i :3000; kill <PID>
+fuser -k 3000/tcp
 ```
 
 ### Model lent (poca RAM)
 ```bash
-ollama pull qwen2.5-coder:7b
-python3 universal_repo_agent_v5.py --input ... --model qwen2.5-coder:7b --execute
+ollama pull qwen2.5:7b
+python3 universal_repo_agent_v5.py --input ... --model qwen2.5:7b --execute
 ```
 O desactiva'l: `--no-model-refine`.
 
@@ -302,7 +331,7 @@ Si només tens `npm`, usa `npm install --legacy-peer-deps` manualment.
 
 ---
 
-## 13) Novetats v5 respecte v4
+## 14) Novetats v5 respecte v4
 
 - Detector Emergent stack (FastAPI+React+Mongo) amb `.env` auto
 - Suport **GitLab** i **Bitbucket** tokens a més de GitHub
@@ -317,7 +346,7 @@ Si només tens `npm`, usa `npm install --legacy-peer-deps` manualment.
 
 ---
 
-## 14) Exemple complet end-to-end
+## 15) Exemple complet end-to-end
 
 ```bash
 # Un cop: instal·la tot
