@@ -22,6 +22,7 @@ REPOS_FULL=(
     "gradio|analyze|https://github.com/gradio-app/gradio|240"
     "fastapi-mongo|run|https://github.com/mongodb-developer/mongodb-with-fastapi|600"
     "go-example|analyze|https://github.com/golang/example|180"
+    "node-js-sample|run|https://github.com/heroku/node-js-sample|300"
 )
 REPOS_QUICK=(
     "flask|analyze|https://github.com/pallets/flask|120"
@@ -29,6 +30,7 @@ REPOS_QUICK=(
     "fastapi|analyze|https://github.com/tiangolo/fastapi|180"
     "streamlit-example|run|https://github.com/streamlit/streamlit-example|600"
     "django|analyze|https://github.com/django/django|180"
+    "node-js-sample|run|https://github.com/heroku/node-js-sample|300"
 )
 [ "$MODE" = "quick" ] && REPOS=("${REPOS_QUICK[@]}") || REPOS=("${REPOS_FULL[@]}")
 

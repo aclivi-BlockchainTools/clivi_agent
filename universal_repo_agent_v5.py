@@ -66,6 +66,7 @@ SAFE_COMMAND_PREFIXES = {
     "python", "python3", "pip", "pip3", "pytest", "uvicorn", "flask", "django-admin", "alembic", "poetry", "streamlit", "gunicorn", "celery", "daphne", "hypercorn",
     "docker", "docker-compose", "compose",
     "make", "go", "cargo", "ruby", "bundle", "rails", "php", "composer", "mvn", "gradle", "java",
+    "deno", "dotnet", "elixir", "mix",
     "bash", "sh", "nohup",
 }
 
@@ -109,14 +110,15 @@ SYSTEM_DEPS: Dict[str, Dict[str, str]] = {
     "go": {"check": "go version", "install": "sudo apt-get install -y golang-go"},
     "pnpm": {"check": "pnpm --version", "install": "npm install -g pnpm --prefix ~/.local 2>/dev/null; export PATH=$HOME/.local/bin:$PATH; pnpm --version"},
     "yarn": {"check": "yarn --version", "install": "npm install -g yarn --prefix ~/.local 2>/dev/null; export PATH=$HOME/.local/bin:$PATH; yarn --version"},
-    "cargo": {"check": "cargo --version", "install": "curl https://sh.rustup.rs -sSf | sh"},
+    "cargo": {"check": "PATH=$HOME/.cargo/bin:$PATH cargo --version", "install": "curl https://sh.rustup.rs -sSf | sh"},
     "ruby": {"check": "ruby --version", "install": "sudo apt-get install -y ruby"},
     "bundle": {"check": "bundle --version", "install": "gem install bundler"},
     "php": {"check": "php --version", "install": "sudo apt-get install -y php"},
     "composer": {"check": "composer --version", "install": "https://getcomposer.org/download/"},
     "java": {"check": "java -version", "install": "sudo apt-get install -y default-jdk"},
     "mvn": {"check": "mvn --version", "install": "sudo apt-get install -y maven"},
-    "deno": {"check": "deno --version", "install": "curl -fsSL https://deno.land/install.sh | sh"},
+    "deno": {"check": "PATH=$HOME/.deno/bin:$PATH deno --version", "install": "curl -fsSL https://deno.land/install.sh | sh && echo 'Deno instal·lat. Afegeix ~/.deno/bin al PATH si no hi és.'"},
+    "dotnet": {"check": "dotnet --version", "install": "sudo apt-get install -y dotnet-sdk-8.0"},
     "elixir": {"check": "elixir --version", "install": "sudo apt-get install -y elixir"},
     "mix": {"check": "mix --version", "install": "sudo apt-get install -y elixir"},
 }
@@ -402,6 +404,9 @@ def run_shell(command: str, cwd: Path, timeout: int = 1800, repo_root: Optional[
     started = time.time()
     # Env no-interactiu: evita que apt, npm, bash 'read' pengin esperant stdin
     env = os.environ.copy()
+    # Afegim directoris d'instal·lació local al PATH (deno, pnpm, yarn, cargo...)
+    local_bins = os.path.expanduser("~/.deno/bin:~/.local/bin:~/.cargo/bin")
+    env["PATH"] = local_bins + ":" + env.get("PATH", "")
     env.update({"CI": "1", "DEBIAN_FRONTEND": "noninteractive", "NONINTERACTIVE": "1",
                 "NPM_CONFIG_YES": "true", "GIT_TERMINAL_PROMPT": "0"})
     # Alimentem newlines a stdin perquè 'read' rebi la resposta per defecte
@@ -417,7 +422,10 @@ def run_shell(command: str, cwd: Path, timeout: int = 1800, repo_root: Optional[
 
 def run_check(command: str) -> bool:
     try:
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=15)
+        env = os.environ.copy()
+        local_bins = os.path.expanduser("~/.deno/bin:~/.local/bin:~/.cargo/bin")
+        env["PATH"] = local_bins + ":" + env.get("PATH", "")
+        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=15, env=env)
         return result.returncode == 0
     except Exception:
         return False
