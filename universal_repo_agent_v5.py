@@ -31,6 +31,7 @@ GitHub/GitLab/Bitbucket tokens for private repos may be supplied via:
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import re
@@ -106,6 +107,8 @@ SYSTEM_DEPS: Dict[str, Dict[str, str]] = {
     "python3": {"check": "python3 --version", "install": "sudo apt-get install -y python3 python3-venv python3-pip"},
     "pip3": {"check": "pip3 --version", "install": "sudo apt-get install -y python3-pip"},
     "docker": {"check": "docker --version", "install": "https://docs.docker.com/engine/install/"},
+    "docker-compose-plugin": {"check": "docker compose version", "install": "sudo apt-get install -y docker-compose-plugin"},
+    "docker-compose": {"check": "docker-compose --version", "install": "sudo apt-get install -y docker-compose"},
     "make": {"check": "make --version", "install": "sudo apt-get install -y build-essential"},
     "go": {"check": "go version", "install": "sudo apt-get install -y golang-go"},
     "pnpm": {"check": "pnpm --version", "install": "npm install -g pnpm --prefix ~/.local 2>/dev/null; export PATH=$HOME/.local/bin:$PATH; pnpm --version"},
@@ -399,6 +402,44 @@ def validate_command(command: str, repo_root: Optional[Path] = None) -> None:
             raise AgentError(f"Patró de comanda bloquejat detectat: {command!r}")
 
 
+_DOCKER_COMPOSE_CMD: Optional[str] = None  # cache: "docker compose" o "docker-compose"
+
+
+def get_docker_compose_cmd() -> Optional[str]:
+    """Detecta quin comandament Docker Compose està disponible.
+    Prefereix 'docker compose' (plugin) sobre 'docker-compose' (standalone).
+    El resultat es cacheja."""
+    global _DOCKER_COMPOSE_CMD
+    if _DOCKER_COMPOSE_CMD is not None:
+        return _DOCKER_COMPOSE_CMD
+    # Comprova docker compose (plugin)
+    try:
+        r = subprocess.run(
+            ["docker", "compose", "version"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0:
+            _DOCKER_COMPOSE_CMD = "docker compose"
+            return _DOCKER_COMPOSE_CMD
+    except Exception:
+        pass
+    # Comprova docker-compose (standalone)
+    try:
+        r = subprocess.run(
+            ["docker-compose", "version"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0:
+            _DOCKER_COMPOSE_CMD = "docker-compose"
+            return _DOCKER_COMPOSE_CMD
+    except Exception:
+        pass
+    # Si no hi ha cap, usa docker compose (plugin modern) però avisa
+    warn("Ni 'docker compose' ni 'docker-compose' trobats. Instal·la Docker Compose: sudo apt-get install -y docker-compose-plugin")
+    _DOCKER_COMPOSE_CMD = "docker compose"
+    return _DOCKER_COMPOSE_CMD
+
+
 def run_shell(command: str, cwd: Path, timeout: int = 1800, repo_root: Optional[Path] = None) -> ExecutionResult:
     validate_command(command, repo_root=repo_root)
     started = time.time()
@@ -619,7 +660,8 @@ def maybe_background_command(command: str, log_rel: str = ".agent_last_run.log")
     el shell les interpreti correctament."""
     markers = ["npm start", "npm run dev", "yarn start", "yarn dev", "pnpm dev",
                "uvicorn ", "flask ", "python manage.py runserver", "streamlit run",
-               "rails server", "php artisan serve", "go run ", "cargo run", "docker compose up"]
+               "rails server", "php artisan serve", "go run ", "cargo run",
+               "docker compose up", "docker-compose up"]
     if any(marker in command for marker in markers):
         # Evita re-wrapping si ja ve amb nohup/&
         if "nohup" in command or command.rstrip().endswith("&"):
@@ -939,8 +981,9 @@ def report_missing_deps(missing: List[str], auto_approve: bool = False) -> bool:
     return answer in {"s", "si", "y", "yes"}
 
 
-def _install_system_dep(dep: str) -> bool:
-    """Intenta instal·lar una dependència del sistema amb la comanda de SYSTEM_DEPS."""
+def _install_system_dep(dep: str, non_interactive: bool = False) -> bool:
+    """Intenta instal·lar una dependència del sistema amb la comanda de SYSTEM_DEPS.
+    Si la comanda requereix sudo, demana la contrasenya a l'usuari (excepte non_interactive)."""
     dep_info = SYSTEM_DEPS.get(dep)
     if not dep_info:
         return False
@@ -948,17 +991,50 @@ def _install_system_dep(dep: str) -> bool:
     if not install_cmd or install_cmd.startswith("http"):
         warn(f"No es pot instal·lar {dep} automàticament. Consulta: {install_cmd}")
         return False
-    info(f"Instal·lant {dep} automàticament ({install_cmd})...")
-    try:
-        result = subprocess.run(
-            install_cmd, shell=True, timeout=120
-        )
-        if result.returncode != 0:
-            warn(f"Instal·lació de {dep} ha fallat (rc={result.returncode})")
-            return False
-    except subprocess.TimeoutExpired:
-        warn(f"Instal·lació de {dep} ha excedit el timeout (120s)")
+
+    needs_sudo = install_cmd.strip().startswith("sudo ")
+    if needs_sudo and non_interactive:
+        warn(f"{dep} requereix sudo però estem en mode no-interactiu. Instal·la'l manualment: {install_cmd}")
         return False
+
+    if needs_sudo:
+        print(f"\n🔐 {dep} requereix permisos de superusuari.")
+        try:
+            password = getpass.getpass(f"   Contrasenya sudo per instal·lar {dep}: ")
+        except (EOFError, KeyboardInterrupt):
+            warn(f"No s'ha pogut llegir la contrasenya. Salta instal·lació de {dep}.")
+            return False
+        if not password:
+            warn(f"Contrasenya buida. Salta instal·lació de {dep}.")
+            return False
+        # Converteix 'sudo X' a 'sudo -S X' per rebre la contrasenya per stdin
+        install_cmd = install_cmd.replace("sudo ", "sudo -S ", 1)
+        info(f"Instal·lant {dep} amb sudo ({install_cmd})...")
+        try:
+            result = subprocess.run(
+                install_cmd, shell=True, timeout=120,
+                input=password + "\n", text=True, capture_output=True,
+            )
+            if result.returncode != 0:
+                stderr_tail = (result.stderr or "")[-200:]
+                warn(f"Instal·lació de {dep} ha fallat (rc={result.returncode}): {stderr_tail}")
+                return False
+        except subprocess.TimeoutExpired:
+            warn(f"Instal·lació de {dep} ha excedit el timeout (120s)")
+            return False
+    else:
+        info(f"Instal·lant {dep} automàticament ({install_cmd})...")
+        try:
+            result = subprocess.run(
+                install_cmd, shell=True, timeout=120,
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                warn(f"Instal·lació de {dep} ha fallat (rc={result.returncode})")
+                return False
+        except subprocess.TimeoutExpired:
+            warn(f"Instal·lació de {dep} ha excedit el timeout (120s)")
+            return False
     check_cmd = dep_info.get("check", f"which {dep}")
     if not run_check(check_cmd):
         warn(f"{dep} instal·lat però no es detecta amb '{check_cmd}'")
@@ -968,7 +1044,7 @@ def _install_system_dep(dep: str) -> bool:
 
 
 def preflight_check(missing_deps: List[str], ports_hint: Optional[List[int]] = None,
-                    auto_approve: bool = False) -> bool:
+                    auto_approve: bool = False, non_interactive: bool = False) -> bool:
     """Pre-flight check ràpid abans de generar el pla. Retorna True si OK per continuar."""
     import shutil as _shutil
     all_ok = True
@@ -981,7 +1057,7 @@ def preflight_check(missing_deps: List[str], ports_hint: Optional[List[int]] = N
         for dep in missing_deps:
             hint = SYSTEM_DEPS.get(dep, {}).get("install", f"sudo apt-get install -y {dep}")
             if auto_approve:
-                ok_result = _install_system_dep(dep)
+                ok_result = _install_system_dep(dep, non_interactive=non_interactive)
                 if ok_result:
                     installed.append(dep)
                     lines.append(f"  ✅ {dep} instal·lat automàticament")
@@ -1267,7 +1343,7 @@ def detect_docker_service(path: Path) -> Optional[ServiceInfo]:
     confidence = 0.75
     if compose_path:
         manifests.append(compose_path.name)
-        entry_hints.append("docker compose up")
+        entry_hints.append(f"{get_docker_compose_cmd()} up")
         confidence += 0.1
         ports_hint = detect_ports_from_text(read_text(compose_path))
     if dockerfile.exists():
@@ -2297,12 +2373,13 @@ def build_dockerize_plan(root: Path, emergent: Dict[str, Any]) -> ExecutionPlan:
              f"Compose file: {compose_path.name}",
              "Backend : http://localhost:8001/api/",
              "Frontend: http://localhost:3000"]
+    _dc = get_docker_compose_cmd()
     steps = [
         CommandStep(id="dockerize-build", title="Construir imatges (backend + frontend)",
-                    cwd=str(root), command=f"docker compose -f {compose_path.name} build",
+                    cwd=str(root), command=f"{_dc} -f {compose_path.name} build",
                     expected_outcome="Imatges construïdes", category="install"),
         CommandStep(id="dockerize-up", title="Aixecar stack complet (backend + frontend + mongo)",
-                    cwd=str(root), command=f"docker compose -f {compose_path.name} up -d",
+                    cwd=str(root), command=f"{_dc} -f {compose_path.name} up -d",
                     expected_outcome="Contenidors en marxa", category="run", critical=False,
                     verify_port=8001, verify_url="http://localhost:8001/api/"),
     ]
@@ -2842,7 +2919,7 @@ def choose_docker_cmd(svc: ServiceInfo) -> Optional[str]:
     path = Path(svc.path)
     for compose in ["docker-compose.yml", "docker-compose.yaml", "compose.yml"]:
         if (path / compose).exists():
-            return "docker compose up --build"
+            return f"{get_docker_compose_cmd()} up --build"
     if (path / "Dockerfile").exists():
         tag = slugify(path.name)
         port = svc.ports_hint[0] if svc.ports_hint else 8080
@@ -3772,7 +3849,8 @@ def main() -> int:
         # Pre-flight check: deps + ports + disk (abans de generar pla)
         svc_ports = [p for s in analysis.services for p in (s.ports_hint or [])]
         if not preflight_check(analysis.missing_system_deps, ports_hint=svc_ports or None,
-                               auto_approve=args.approve_all):
+                               auto_approve=args.approve_all,
+                               non_interactive=args.non_interactive):
             return 1
 
         # Backup .env abans de modificar (rollback)
