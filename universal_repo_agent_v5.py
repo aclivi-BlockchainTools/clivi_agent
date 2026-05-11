@@ -61,7 +61,7 @@ DEFAULT_VERIFY_TIMEOUT = 120
 
 SAFE_COMMAND_PREFIXES = {
     "ls", "pwd", "cat", "echo", "cp", "mv", "mkdir", "rm", "find", "grep", "sed", "awk", "env", "printenv", "which", "test", "true", "false",
-    "sleep", "wait", "kill", "pkill",
+    "sleep", "wait", "kill", "pkill", "fuser",
     "git", "unzip", "tar", "curl", "wget", "ss", "lsof", "ps", "df", "du", "chmod",
     "node", "npm", "npx", "yarn", "pnpm", "corepack",
     "python", "python3", "pip", "pip3", "pytest", "uvicorn", "flask", "django-admin", "alembic", "poetry", "streamlit", "gunicorn", "celery", "daphne", "hypercorn",
