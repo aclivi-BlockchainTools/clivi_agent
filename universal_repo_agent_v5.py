@@ -931,7 +931,7 @@ def build_db_provision_steps(db_hints: List[str]) -> Tuple[List[CommandStep], Di
         image = cfg["image"]
         port = cfg["port"]
         env_flags = " ".join(f'-e {k}="{v}"' for k, v in cfg["env_vars"].items())
-        command = f"docker inspect {container} > /dev/null 2>&1 && docker start {container} || (docker run -d --name {container} -p {port}:{port} {env_flags} {image} && for i in $(seq 1 30); do nc -z localhost {port} 2>/dev/null && break; sleep 2; done)"
+        command = f"docker inspect {container} > /dev/null 2>&1 && docker start {container} || (docker run -d --name {container} -p {port}:{port} {env_flags} {image} && sleep 3 && for i in $(seq 1 90); do nc -z localhost {port} 2>/dev/null && break; sleep 2; done)"
         display_name = f"{db_key} → {actual_db}" if db_key != actual_db else db_key
         steps.append(CommandStep(id=f"db-provision-{db_key}", title=f"Provisió automàtica de {display_name.upper()} (Docker)", cwd="/tmp", command=command, expected_outcome=f"Contenidor {actual_db} en execució al port {port}", critical=False, category="db", verify_port=port))
         env_vars[cfg["url_env"]] = cfg["url_template"]
@@ -1447,12 +1447,11 @@ def detect_monorepo_tool(path: Path) -> Optional[str]:
 
 
 def detect_deno_service(path: Path) -> Optional[ServiceInfo]:
-    """Detecta projectes Deno (deno.json, deno.jsonc, import_map.json)."""
+    """Detecta projectes Deno (deno.json, deno.jsonc, import_map.json, o .ts amb imports Deno)."""
     deno_json = path / "deno.json"
     deno_jsonc = path / "deno.jsonc"
     import_map = path / "import_map.json"
-    if not deno_json.exists() and not deno_jsonc.exists():
-        return None
+    has_manifest = deno_json.exists() or deno_jsonc.exists()
     manifests: List[str] = []
     if deno_json.exists():
         manifests.append("deno.json")
@@ -1460,16 +1459,32 @@ def detect_deno_service(path: Path) -> Optional[ServiceInfo]:
         manifests.append("deno.jsonc")
     if import_map.exists():
         manifests.append("import_map.json")
+    # Fallback: detecta .ts/.js amb imports Deno (npm:, jsr:, https://deno.land/)
+    if not has_manifest:
+        ts_files = list(path.glob("*.ts")) + list(path.glob("*.js"))
+        deno_imports = False
+        for f in ts_files[:10]:
+            try:
+                content = f.read_text(errors="ignore")[:2000]
+                if re.search(r'\bfrom\s+["\'](?:npm:|jsr:|https?://deno\.land/)', content):
+                    deno_imports = True
+                    break
+            except Exception:
+                pass
+        if not deno_imports:
+            return None
     text = ""
     try:
-        text = read_text(deno_json if deno_json.exists() else deno_jsonc)
+        if has_manifest:
+            text = read_text(deno_json if deno_json.exists() else deno_jsonc)
     except Exception:
         pass
     ports = detect_ports_from_text(text)
     run_url = f"http://localhost:{ports[0]}" if ports else "http://localhost:8001"
     return ServiceInfo(name=path.name, path=str(path), service_type="deno", framework="deno",
-                       entry_hints=["deno run --allow-net main.ts", "deno task start"],
-                       manifests=manifests, confidence=0.65, run_url=run_url)
+                       entry_hints=["deno run -A main.ts", "deno task start"],
+                       manifests=manifests, confidence=0.65 if has_manifest else 0.4,
+                       run_url=run_url)
 
 
 def detect_elixir_service(path: Path) -> Optional[ServiceInfo]:
@@ -3137,7 +3152,7 @@ def build_deterministic_plan(analysis: RepoAnalysis) -> ExecutionPlan:
                 steps.append(CommandStep(id=f"make-{slugify(svc.name)}-{preferred}", title=f"make {preferred} — {svc.name}", cwd=svc.path, command=f"make {preferred}", expected_outcome=f"make {preferred} completat", category="run", critical=False))
         elif st == "deno":
             # Llegeix les tasks del deno.json per trobar la millor comanda
-            run_cmd = "deno run --allow-net main.ts"  # fallback
+            run_cmd = "deno run -A main.ts"  # fallback
             deno_json_path = svc_path / "deno.json"
             if deno_json_path.exists():
                 try:
@@ -3154,6 +3169,12 @@ def build_deterministic_plan(analysis: RepoAnalysis) -> ExecutionPlan:
                             run_cmd = f"deno task {first}"
                 except Exception:
                     pass
+            else:
+                # Sense deno.json: busca el millor entry point .ts
+                for candidate in ("server.ts", "main.ts", "index.ts", "app.ts", "mod.ts"):
+                    if (svc_path / candidate).exists():
+                        run_cmd = f"deno run -A {candidate}"
+                        break
             command, verify_port_num, verify_url = choose_service_verify(run_cmd, svc)
             steps.append(CommandStep(id=f"deno-run-{slugify(svc.name)}", title=f"Deno run — {svc.name}", cwd=svc.path, command=command, expected_outcome="Servidor Deno disponible", category="run", critical=False, verify_port=verify_port_num, verify_url=verify_url))
         elif st == "elixir":

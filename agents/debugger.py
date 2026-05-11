@@ -35,6 +35,104 @@ def _info(msg: str) -> None:
     print(f"[INFO] {msg}")
 
 
+_CONVERSATIONAL_PREFIXES = [
+    "per arreglar-ho prova:",
+    "per assegurar-te",
+    "per solucionar",
+    "per verificar",
+    "per comprovar",
+    "la solució és",
+    "pots provar",
+    "prova amb",
+    "executa:",
+    "executa",
+    "cal fer",
+    "caldria",
+    "has de fer",
+    "podries fer",
+    "intenta amb",
+    "intenta",
+    "suggereixo",
+    "recomano",
+    "to fix this",
+    "try running",
+    "try:",
+    "run:",
+    "you should",
+    "you can",
+    "the fix is",
+    "the solution is",
+    "i recommend",
+    "let's try",
+    "we need to",
+    "first,",
+    "then,",
+    "finally,",
+]
+
+
+def _extract_bash_command(raw: str) -> Optional[str]:
+    """Extreu una comanda bash neta del text generat pel model.
+
+    El model de vegades envolta la comanda amb text introductori o explicacions.
+    Aquesta funció:
+    1. Pren la primera línia
+    2. Elimina prefixos conversacionals
+    3. Retorna None si el resultat no sembla una comanda
+    """
+    if not raw or not raw.strip():
+        return None
+    lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
+    if not lines:
+        return None
+    # Si la primera línia és curta i sembla una comanda, usa-la directament
+    first = lines[0]
+    # Descarta línies que són només text explicatiu (sense caràcters de comanda)
+    for line in lines:
+        # Salta línies que comencen amb prefixos conversacionals
+        lower = line.lower()
+        if any(lower.startswith(p) for p in _CONVERSATIONAL_PREFIXES):
+            continue
+        # Salta línies que són clarament text (massa paraules, sense sintaxi de comanda)
+        words = line.split()
+        if len(words) >= 4 and all(not w.startswith("-") and "/" not in w for w in words):
+            # Podria ser text, però comprovem si conté una comanda coneguda
+            has_known_cmd = any(
+                w in {"pip", "npm", "yarn", "pnpm", "docker", "git", "make", "cargo",
+                      "go", "deno", "mix", "dotnet", "python", "python3", "node", "npx",
+                      "uvicorn", "streamlit", "flask", "django-admin", "bash", "sh",
+                      "nc", "curl", "wget", "apt", "apt-get", "systemctl", "kill"}
+                for w in words
+            )
+            if not has_known_cmd:
+                continue
+        return line
+    # Fallback: usa la primera línia si cap altra funciona
+    return first
+
+
+def _sanitize_quotes(command: str) -> str:
+    """Elimina cometes dobles desbalancejades que trenquen shlex.split().
+
+    Si el nombre de cometes dobles és senar, elimina-les totes.
+    Si la comanda té cometes dobles balancejades dins d'arguments, conserva-les.
+    """
+    if not command:
+        return command
+    # Si la comanda comença o acaba amb una cometa doble solitària, elimina-la
+    stripped = command.strip()
+    if stripped.startswith('"') and not stripped.endswith('"'):
+        stripped = stripped[1:]
+    if stripped.endswith('"') and not stripped.startswith('"'):
+        stripped = stripped[:-1]
+    # Recompte de cometes dobles
+    dq_count = stripped.count('"')
+    if dq_count % 2 != 0:
+        # Senar: elimina totes les cometes dobles
+        stripped = stripped.replace('"', '')
+    return stripped
+
+
 class RepairKB:
     def __init__(self, kb_dir: Optional[str] = None):
         self._dir = Path(kb_dir) if kb_dir else _DEFAULT_KB_DIR
@@ -207,6 +305,14 @@ class IntelligentDebugger:
             return getattr(services[0], "service_type", "unknown")
         return "unknown"
 
+    _BASH_ONLY_INSTRUCTION = (
+        "IMPORTANT: El camp 'command' ha de ser UNA sola comanda bash executable, "
+        "sense text introductori ni explicacions. Només la comanda crua. "
+        "Exemples vàlids: 'pip install requests', 'npm install', 'docker start postgresql'. "
+        "Mai: 'Per arreglar-ho prova: npm install' o 'La solució és fer npm install'. "
+        "No facis servir cometes dobles dins la comanda — usa cometes simples si cal."
+    )
+
     def _build_system_prompt(self, stack: str, kb_md: str) -> str:
         root = getattr(self.analysis, "root", "")
         manifests = getattr(self.analysis, "top_level_manifests", [])
@@ -220,7 +326,8 @@ class IntelligentDebugger:
             f"Stack detectat: {stack}\n"
             f"Arrel del repo: {root}\n"
             f"Fitxers principals: {manifests_str}{missing_str}{kb_section}\n"
-            f"Regles: sense sudo, sense comandes destructives, cwd fix, només Linux."
+            f"Regles: sense sudo, sense comandes destructives, cwd fix, només Linux.\n"
+            f"{self._BASH_ONLY_INSTRUCTION}"
         )
 
     def _diagnose(self, step: Any, result: Any) -> Diagnosis:
@@ -277,6 +384,8 @@ class IntelligentDebugger:
         )
         # Elimina '| head N' / '2>&1 | head N' finals que emmascareu el codi de sortida
         command = re.sub(r'\s*(?:2>&1\s*)?\|\s*(?:head|tail)\s+[-\d]+\s*$', '', command).rstrip()
+        # Sanitize: elimina cometes dobles desbalancejades que trenquen shlex
+        command = _sanitize_quotes(command)
         repo_root = Path(self.analysis.root)
         try:
             validate_command(command, repo_root=repo_root)
@@ -345,7 +454,10 @@ class IntelligentDebugger:
         for attempt in range(1, self.max_repair_attempts + 1):
             try:
                 data = self._ollama(messages=history, schema=schema, timeout=90)
-                command = data["command"].strip().splitlines()[0]
+                command = _extract_bash_command(data.get("command", ""))
+                if not command:
+                    _warn("El model no ha generat una comanda usable.")
+                    break
             except Exception as e:
                 _warn(f"Ollama repair suggestion failed: {e}")
                 break
@@ -431,7 +543,7 @@ class IntelligentDebugger:
             match = re.search(r'\{[^}]+\}', raw, re.DOTALL)
             if match:
                 data = json.loads(match.group())
-                command = data.get("command", "").strip().splitlines()[0]
+                command = _extract_bash_command(data.get("command", ""))
                 if command:
                     return command
         except Exception as e:
