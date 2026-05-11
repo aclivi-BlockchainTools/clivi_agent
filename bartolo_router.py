@@ -18,7 +18,8 @@ _L1_RULES = [
      "temps_data"),
 
     (re.compile(
-        r'\b(quins serveis|serveis arrancats|serveis actius|repos arrancats|'
+        r'\b(quins serveis|serveis arrencats|serveis arrecats|serveis arrancats|serveis actius|'
+        r'repos arrencats|repos arrecats|repos arrancats|'
         r'repos actius|que (esta|estan|hi ha) (arrencat|corrent|actiu|engegat)|'
         r'estat (dels serveis|del workspace|dels repos)|'
         r'quins repos (corre|corren|estan)|que corre al workspace|'
