@@ -41,7 +41,7 @@ import subprocess
 import textwrap
 import time
 import zipfile
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
@@ -49,6 +49,21 @@ from urllib.parse import urlparse
 import requests
 
 from agents.success_kb import lookup_plan, record_success
+
+# Bartolo v6 foundation imports (Phase 1)
+from bartolo.types import (
+    ServiceInfo, RepoAnalysis, CommandStep, ExecutionPlan,
+    StepError, ExecutionResult, SmokeResult,
+)
+from bartolo.exceptions import (
+    AgentError, DetectorError, StepExecutionError,
+    ProvisionerError, PreflightError, ValidationError,
+)
+from bartolo.validator import (
+    validate_command, SAFE_COMMAND_PREFIXES, BLOCKED_PATTERNS,
+    PROTECTED_CONTAINERS, ShellCommand,
+)
+from bartolo.shell import run_shell, run_check, run_check_version, maybe_background_command
 
 
 OLLAMA_CHAT_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")
@@ -58,43 +73,6 @@ LOG_DIRNAME = ".agent_logs"
 SERVICES_REGISTRY = ".agent_services.json"
 MAX_REPAIR_ATTEMPTS = 2
 DEFAULT_VERIFY_TIMEOUT = 120
-
-SAFE_COMMAND_PREFIXES = {
-    "ls", "pwd", "cat", "echo", "cp", "mv", "mkdir", "rm", "find", "grep", "sed", "awk", "env", "printenv", "which", "test", "true", "false",
-    "sleep", "wait", "kill", "pkill", "fuser",
-    "git", "unzip", "tar", "curl", "wget", "ss", "lsof", "ps", "df", "du", "chmod",
-    "node", "npm", "npx", "yarn", "pnpm", "corepack",
-    "python", "python3", "pip", "pip3", "pytest", "uvicorn", "flask", "django-admin", "alembic", "poetry", "streamlit", "gunicorn", "celery", "daphne", "hypercorn",
-    "docker", "docker-compose", "compose",
-    "make", "go", "cargo", "ruby", "bundle", "rails", "php", "composer", "mvn", "gradle", "java",
-    "deno", "dotnet", "elixir", "mix",
-    "bash", "sh", "nohup",
-}
-
-# Containers gestionats manualment que l'agent NO ha de destruir mai.
-# Per actualitzar-los, usar l'endpoint /update_container del bridge.
-PROTECTED_CONTAINERS = {"open-webui", "open-webui-pipelines"}
-
-BLOCKED_PATTERNS = [
-    r"\bshutdown\b",
-    r"\breboot\b",
-    r"\bmkfs\b",
-    r"\bdd\b",
-    r"\bmount\b",
-    r"\bumount\b",
-    r"\bchown\b",
-    r"\bchmod\s+777\b",
-    r"\buseradd\b",
-    r"\bpasswd\b",
-    r"\bsudo\b",
-    r">\s*/etc/",
-    r"rm\s+-rf\s+/",
-    r"curl\s+.*\|\s*(bash|sh)",
-    r"wget\s+.*\|\s*(bash|sh)",
-    # Protegeix containers crítics de destrucció accidental
-    r"docker\s+(stop|kill|rm|remove)\s+[^|&;\n]*\b(" + "|".join(PROTECTED_CONTAINERS) + r")\b",
-    r"docker\s+compose\s+(down|stop|rm)\b",
-]
 
 SETUP_SCRIPT_NAMES = [
     "setup.sh", "install.sh", "bootstrap.sh", "init.sh", "start.sh", "run.sh", "dev.sh", "build.sh", "setup.py", "Makefile",
@@ -203,96 +181,6 @@ ENV_VAR_PATTERNS = [
 ]
 
 
-@dataclass
-class ServiceInfo:
-    name: str
-    path: str
-    service_type: str
-    framework: Optional[str] = None
-    entry_hints: List[str] = field(default_factory=list)
-    manifests: List[str] = field(default_factory=list)
-    package_manager: Optional[str] = None
-    scripts: Dict[str, str] = field(default_factory=dict)
-    ports_hint: List[int] = field(default_factory=list)
-    confidence: float = 0.0
-    run_url: Optional[str] = None
-    final_run_cmd: Optional[str] = None
-
-
-@dataclass
-class RepoAnalysis:
-    root: str
-    repo_name: str
-    services: List[ServiceInfo] = field(default_factory=list)
-    top_level_manifests: List[str] = field(default_factory=list)
-    env_files_present: List[str] = field(default_factory=list)
-    env_examples_present: List[str] = field(default_factory=list)
-    env_vars_needed: Dict[str, str] = field(default_factory=dict)
-    likely_fullstack: bool = False
-    likely_db_needed: bool = False
-    db_hints: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
-    host_requirements: List[str] = field(default_factory=list)
-    missing_system_deps: List[str] = field(default_factory=list)
-    setup_scripts_found: List[str] = field(default_factory=list)
-    readme_instructions: List[str] = field(default_factory=list)
-    db_provisioned: List[str] = field(default_factory=list)
-    cloud_services: List[str] = field(default_factory=list)
-    runtime_version_warnings: List[str] = field(default_factory=list)
-    monorepo_tool: Optional[str] = None
-    repo_type: str = "application"
-
-
-@dataclass
-class CommandStep:
-    id: str
-    title: str
-    cwd: str
-    command: str
-    expected_outcome: str
-    critical: bool = True
-    category: str = "run"
-    verify_url: Optional[str] = None
-    verify_port: Optional[int] = None
-
-
-@dataclass
-class ExecutionPlan:
-    summary: str
-    steps: List[CommandStep] = field(default_factory=list)
-    notes: List[str] = field(default_factory=list)
-
-
-@dataclass
-class StepError:
-    step_id: str
-    step_title: str
-    command: str
-    cwd: str
-    returncode: int
-    stdout_tail: str
-    stderr_tail: str
-    diagnosis: str = ""
-    repaired: bool = False
-
-
-@dataclass
-class ExecutionResult:
-    step_id: str
-    command: str
-    cwd: str
-    returncode: int
-    stdout: str
-    stderr: str
-    started_at: float
-    finished_at: float
-    repaired: bool = False
-
-
-class AgentError(Exception):
-    pass
-
-
 def info(msg: str) -> None:
     print(f"[INFO] {msg}")
 
@@ -340,72 +228,6 @@ def shlex_first_token(command: str) -> str:
     return parts[0] if parts else ""
 
 
-def _first_real_token(tokens: List[str]) -> Tuple[str, List[str]]:
-    """Salta assignacions d'env var a l'inici (p.ex. PORT=3000 FOO=bar yarn start)
-    i retorna (primer_token_real, env_assignments)."""
-    env_assignments: List[str] = []
-    i = 0
-    env_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-    while i < len(tokens) and env_re.match(tokens[i]):
-        env_assignments.append(tokens[i])
-        i += 1
-    if i >= len(tokens):
-        return "", env_assignments
-    return tokens[i], env_assignments
-
-
-def validate_command(command: str, repo_root: Optional[Path] = None) -> None:
-    import shlex
-    tokens = shlex.split(command)
-    if not tokens:
-        raise AgentError("Comanda buida")
-    # Saltar assignacions d'env var inicials: PORT=3000 yarn start → 'yarn'
-    prefix, _env = _first_real_token(tokens)
-    if not prefix:
-        raise AgentError("Comanda sense binari a executar")
-    # Saltar wrappers de process management (setsid, nohup) i buscar el binari real
-    while prefix in {"setsid", "nohup"}:
-        try:
-            idx = tokens.index(prefix) + 1
-        except ValueError:
-            break
-        sub_prefix, _ = _first_real_token(tokens[idx:])
-        if not sub_prefix:
-            raise AgentError(f"{prefix} sense comanda")
-        prefix = sub_prefix
-    if prefix in {"bash", "sh"}:
-        # Busca el primer argument no-flag que sigui un script
-        idx = tokens.index(prefix) + 1
-        script_arg = None
-        while idx < len(tokens):
-            if not tokens[idx].startswith("-"):
-                script_arg = tokens[idx]
-                break
-            idx += 1
-        if not script_arg:
-            raise AgentError("bash/sh sense argument d'script no permès")
-        if repo_root:
-            script_path = (repo_root / script_arg).resolve() if not Path(script_arg).is_absolute() else Path(script_arg).resolve()
-            if not str(script_path).startswith(str(repo_root.resolve())):
-                raise AgentError(f"Script fora del repositori no permès: {script_arg}")
-    elif prefix in SAFE_COMMAND_PREFIXES:
-        pass
-    elif "/" in prefix:
-        # Permetre camins a binaris dins del repo o d'un venv del repo (p.ex. .venv/bin/pip, ./scripts/run.sh)
-        basename = Path(prefix).name
-        if basename not in SAFE_COMMAND_PREFIXES:
-            raise AgentError(f"Prefix de comanda no permès: {prefix!r}")
-        if repo_root:
-            bin_path = (repo_root / prefix).resolve() if not Path(prefix).is_absolute() else Path(prefix).resolve()
-            if not str(bin_path).startswith(str(repo_root.resolve())):
-                raise AgentError(f"Binari fora del repositori no permès: {prefix}")
-    else:
-        raise AgentError(f"Prefix de comanda no permès: {prefix!r}")
-    for pattern in BLOCKED_PATTERNS:
-        if re.search(pattern, command, flags=re.IGNORECASE):
-            raise AgentError(f"Patró de comanda bloquejat detectat: {command!r}")
-
-
 _DOCKER_COMPOSE_CMD: Optional[str] = None  # cache: "docker compose" o "docker-compose"
 
 
@@ -442,49 +264,6 @@ def get_docker_compose_cmd() -> Optional[str]:
     warn("Ni 'docker compose' ni 'docker-compose' trobats. Instal·la Docker Compose: sudo apt-get install -y docker-compose-plugin")
     _DOCKER_COMPOSE_CMD = "docker compose"
     return _DOCKER_COMPOSE_CMD
-
-
-def run_shell(command: str, cwd: Path, timeout: int = 1800, repo_root: Optional[Path] = None) -> ExecutionResult:
-    validate_command(command, repo_root=repo_root)
-    started = time.time()
-    # Env no-interactiu: evita que apt, npm, bash 'read' pengin esperant stdin
-    env = os.environ.copy()
-    # Afegim directoris d'instal·lació local al PATH (deno, pnpm, yarn, cargo...)
-    local_bins = os.path.expanduser("~/.deno/bin:~/.local/bin:~/.cargo/bin")
-    env["PATH"] = local_bins + ":" + env.get("PATH", "")
-    env.update({"CI": "1", "DEBIAN_FRONTEND": "noninteractive", "NONINTERACTIVE": "1",
-                "NPM_CONFIG_YES": "true", "GIT_TERMINAL_PROMPT": "0"})
-    # Alimentem newlines a stdin perquè 'read' rebi la resposta per defecte
-    # en lloc d'EOF (que alguns scripts tracten com a error)
-    stdin_input = "\n" * 40
-    try:
-        proc = subprocess.run(command, cwd=str(cwd), shell=True, capture_output=True,
-                              text=True, timeout=timeout, input=stdin_input, env=env)
-    except subprocess.TimeoutExpired:
-        return ExecutionResult(step_id="", command=command, cwd=str(cwd), returncode=-1, stdout="", stderr=f"TIMEOUT ({timeout}s)", started_at=started, finished_at=time.time())
-    return ExecutionResult(step_id="", command=command, cwd=str(cwd), returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr, started_at=started, finished_at=time.time())
-
-
-def run_check(command: str) -> bool:
-    try:
-        env = os.environ.copy()
-        local_bins = os.path.expanduser("~/.deno/bin:~/.local/bin:~/.cargo/bin")
-        env["PATH"] = local_bins + ":" + env.get("PATH", "")
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=15, env=env)
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
-def run_check_version(command: str) -> Optional[str]:
-    """Com run_check() pero retorna la primera linia de stdout (la versio)."""
-    try:
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=15)
-        if result.returncode == 0:
-            return (result.stdout + result.stderr).strip().split("\n")[0]
-    except Exception:
-        pass
-    return None
 
 
 def parse_version(version_str: str) -> Tuple[int, ...]:
@@ -656,40 +435,6 @@ def verify_port(port: int, timeout: int = DEFAULT_VERIFY_TIMEOUT) -> bool:
             return True
         time.sleep(1)
     return False
-
-
-def maybe_background_command(command: str, log_rel: str = ".agent_last_run.log") -> Tuple[str, bool]:
-    """Retorna (command_modificat, is_background). Si cal, embolica amb nohup+& i imprimeix el PID.
-    Les assignacions d'env var al principi (PORT=3000 ...) es mantenen abans de nohup perquè
-    el shell les interpreti correctament."""
-    markers = ["npm start", "npm run dev", "yarn start", "yarn dev", "pnpm dev",
-               "uvicorn ", "flask ", "python manage.py runserver", "streamlit run",
-               "rails server", "php artisan serve", "go run ", "cargo run",
-               "docker compose up", "docker-compose up",
-               "deno run", "deno task", "dotnet run", "dotnet watch",
-               "mix phx.server", "mix run", "bundle exec"]
-    if any(marker in command for marker in markers):
-        # Evita re-wrapping si ja ve amb nohup/&
-        if "nohup" in command or command.rstrip().endswith("&"):
-            return command, True
-        # Extreu assignacions d'env var inicials perquè quedin abans de 'nohup'
-        import shlex
-        try:
-            tokens = shlex.split(command)
-        except ValueError:
-            tokens = command.split()
-        env_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-        env_assigns: List[str] = []
-        i = 0
-        while i < len(tokens) and env_re.match(tokens[i]):
-            env_assigns.append(tokens[i])
-            i += 1
-        rest = " ".join(shlex.quote(t) if " " in t else t for t in tokens[i:])
-        env_prefix = (" ".join(env_assigns) + " ") if env_assigns else ""
-        dotenv_load = "test -f .env && export $(grep -v '^#' .env | grep -v '^$' | xargs); "
-        wrapped = f"{env_prefix}{dotenv_load}setsid nohup {rest} > {log_rel} 2>&1 < /dev/null & echo __AGENT_PID__=$!"
-        return wrapped, True
-    return command, False
 
 
 def ollama_chat_json(model: str, messages: List[Dict[str, str]], schema: Optional[Dict[str, Any]] = None, timeout: int = 180) -> Any:
@@ -2430,13 +2175,6 @@ def build_dockerize_plan(root: Path, emergent: Dict[str, Any]) -> ExecutionPlan:
 # =============================================================================
 # MILLORA B — Smoke tests automàtics post-arrencada
 # =============================================================================
-
-@dataclass
-class SmokeResult:
-    name: str
-    success: bool
-    detail: str
-
 
 def _framework_endpoints(svc) -> List[str]:
     """Retorna endpoints canònics segons el framework del servei."""
