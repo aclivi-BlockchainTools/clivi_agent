@@ -21,14 +21,11 @@ from universal_repo_agent_v5 import (
     DEFAULT_WORKSPACE,
     acquire_input,
     analyze_repo,
-    build_deterministic_plan,
-    execute_plan,
     ensure_workspace,
-    preflight_check,
-    print_analysis,
-    print_final_summary,
-    print_plan,
 )
+from bartolo.planner import build_deterministic_plan, print_analysis, print_plan
+from bartolo.executor import execute_plan, print_final_summary
+from bartolo.preflight import preflight_check
 
 
 def _ask(prompt: str, default: str = "") -> str:

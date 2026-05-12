@@ -32,10 +32,8 @@ from urllib.parse import parse_qs, urlparse
 
 THIS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(THIS_DIR))
-from universal_repo_agent_v5 import (  # type: ignore
-    DEFAULT_WORKSPACE, SERVICES_REGISTRY, LOG_DIRNAME,
-    load_services_registry, stop_services,
-)
+from universal_repo_agent_v5 import DEFAULT_WORKSPACE, SERVICES_REGISTRY, LOG_DIRNAME  # type: ignore
+from bartolo.executor import load_services_registry, stop_services
 
 WORKSPACE = DEFAULT_WORKSPACE
 AGENT_SCRIPT = THIS_DIR / "universal_repo_agent_v5.py"

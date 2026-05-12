@@ -5,13 +5,19 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import socket
 import subprocess
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+import requests
+
+from bartolo.exceptions import AgentError
 from bartolo.types import ExecutionResult
 from bartolo.validator import ShellCommand, validate_command
+
+DEFAULT_VERIFY_TIMEOUT = 120
 
 
 def _env_with_local_bins() -> dict:
@@ -22,8 +28,9 @@ def _env_with_local_bins() -> dict:
     return env
 
 
-def run_shell(command: str, cwd: Path, timeout: int = 1800, repo_root: Optional[Path] = None) -> ExecutionResult:
-    validate_command(command, repo_root=repo_root)
+def run_shell(command: str, cwd: Path, timeout: int = 1800, repo_root: Optional[Path] = None, _skip_validation: bool = False) -> ExecutionResult:
+    if not _skip_validation:
+        validate_command(command, repo_root=repo_root)
     started = time.time()
     env = _env_with_local_bins()
     env.update({"CI": "1", "DEBIAN_FRONTEND": "noninteractive", "NONINTERACTIVE": "1",
@@ -84,7 +91,44 @@ def maybe_background_command(command: str, log_rel: str = ".agent_last_run.log")
             i += 1
         rest = " ".join(shlex.quote(t) if " " in t else t for t in tokens[i:])
         env_prefix = (" ".join(env_assigns) + " ") if env_assigns else ""
-        dotenv_load = "test -f .env && export $(grep -v '^#' .env | grep -v '^$' | xargs); "
-        wrapped = f"{env_prefix}{dotenv_load}setsid nohup {rest} > {log_rel} 2>&1 < /dev/null & echo __AGENT_PID__=$!"
+        dotenv_load = "test -f .env && set -a && . ./.env && set +a; "
+        wrapped = f"test -f .env && set -a && . ./.env && set +a; {env_prefix}setsid nohup {rest} > {log_rel} 2>&1 < /dev/null & echo __AGENT_PID__=$!"
         return wrapped, True
     return command, False
+
+
+def is_port_open(port: int, host: str = "127.0.0.1") -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.5)
+        return sock.connect_ex((host, port)) == 0
+
+
+def find_free_port(start: int, max_attempts: int = 50) -> int:
+    port = start
+    for _ in range(max_attempts):
+        if not is_port_open(port):
+            return port
+        port += 1
+    raise AgentError(f"No s'ha trobat cap port lliure a partir de {start}")
+
+
+def verify_http(url: str, timeout: int = DEFAULT_VERIFY_TIMEOUT) -> bool:
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            response = requests.get(url, timeout=2)
+            if response.status_code < 500:
+                return True
+        except Exception:
+            pass
+        time.sleep(1)
+    return False
+
+
+def verify_port(port: int, timeout: int = DEFAULT_VERIFY_TIMEOUT) -> bool:
+    end = time.time() + timeout
+    while time.time() < end:
+        if is_port_open(port):
+            return True
+        time.sleep(1)
+    return False

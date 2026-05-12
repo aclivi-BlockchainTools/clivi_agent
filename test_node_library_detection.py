@@ -5,7 +5,7 @@ Executa amb: python3 test_node_library_detection.py
 """
 import sys
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
-from universal_repo_agent_v5 import is_node_library
+from bartolo.detectors.discovery import is_node_library
 
 CASES = [
     # (descripció, pkg_data, esperat)

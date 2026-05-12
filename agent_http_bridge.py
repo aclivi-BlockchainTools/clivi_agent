@@ -380,7 +380,7 @@ def _workspace_services() -> Dict[str, Any]:
             capture_output=True, text=True, timeout=5,
         )
         if r.returncode == 0 and r.stdout.strip():
-            from universal_repo_agent_v5 import DB_DOCKER_CONFIGS
+            from bartolo.provisioner import DB_DOCKER_CONFIGS
             databases = []
             for line in r.stdout.strip().splitlines():
                 parts = line.strip().split(maxsplit=1)
@@ -1040,7 +1040,7 @@ def _wizard_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
     if step == "CONFIRM_PATH":
         db_info = ""
         if analysis.get("db_hints"):
-            from universal_repo_agent_v5 import CLOUD_TO_LOCAL
+            from bartolo.provisioner import CLOUD_TO_LOCAL
             db_parts = []
             for db in analysis["db_hints"]:
                 if db in CLOUD_TO_LOCAL:
@@ -1088,7 +1088,7 @@ def _wizard_next_question(state: Dict[str, Any]) -> Dict[str, Any]:
         secrets_info = f"{len(secrets)} claus configurades" if secrets else "cap clau nova"
         db_info = ""
         if analysis.get("db_hints"):
-            from universal_repo_agent_v5 import DB_DOCKER_CONFIGS, CLOUD_TO_LOCAL
+            from bartolo.provisioner import DB_DOCKER_CONFIGS, CLOUD_TO_LOCAL
             db_parts = []
             for db in analysis["db_hints"]:
                 actual_db = CLOUD_TO_LOCAL.get(db, db)

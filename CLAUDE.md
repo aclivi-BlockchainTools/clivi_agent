@@ -6,7 +6,7 @@ Sistema d'arrencada universal de repositoris a Ubuntu. Clona repos de GitHub/Git
 
 L'usuari final coneix el sistema com **"Bartolo"** (el nom del model d'OpenWebUI configurat).
 
-## Arquitectura actual (3 capes)
+## Arquitectura actual (3 capes + paquet modular)
 
 ```
 [Usuari] → OpenWebUI :3001 → Tools (function calling) → agent_http_bridge.py :9090 → universal_repo_agent_v5.py
@@ -16,7 +16,8 @@ L'usuari final coneix el sistema com **"Bartolo"** (el nom del model d'OpenWebUI
 
 - **OpenWebUI**: xat amb Qwen2.5:14b via Ollama, function calling nadiu
 - **Bridge HTTP** (`agent_http_bridge.py`): exposa l'agent com REST API al port 9090
-- **Agent CLI** (`universal_repo_agent_v5.py`): el cervell — 4060 línies, validator + planner + executor + preflight + plan B + success KB + 12 detectors
+- **Agent CLI** (`universal_repo_agent_v5.py`): punt d'entrada — 1225 línies, delega a `bartolo/`
+- **Paquet `bartolo/`** (18 mòduls, ~4400 línies): tota la lògica — detectors, planner, executor, repair, CLI, validació, tipus
 - **Dashboard** (`dashboard.py`): UI web a 9999, sense dependències extra
 - **Tool OpenWebUI** (`openwebui_tool_repo_agent.py`): client Python pur (urllib) que el container OpenWebUI carrega
 
@@ -24,14 +25,30 @@ L'usuari final coneix el sistema com **"Bartolo"** (el nom del model d'OpenWebUI
 
 | Fitxer | Què fa | Línies |
 |---|---|---|
-| `universal_repo_agent_v5.py` | Agent CLI, cor del sistema | 4060 |
+| `universal_repo_agent_v5.py` | Punt d'entrada CLI, delega a `bartolo/` | 1225 |
 | `agent_http_bridge.py` | REST API al port 9090, jobs async, shell exec amb token, upload ZIP, wizard, router dispatch | 1408 |
 | `openwebui_tool_repo_agent.py` | Tool per OpenWebUI (v2.4, 10 funcions) | 403 |
 | `openwebui_tool_web_search.py` | Tool DuckDuckGo per cerques | 112 |
 | `bartolo_router.py` | Classificador d'intencions L1 (regex) + L2 (LLM) — 8 intents | 253 |
 | `bartolo_init.py` | CLI interactiva per muntar repos sense flags (reutilitza l'agent) | 168 |
-| `agents/success_kb.py` | Registre de plans que han funcionat per stack (KB d'èxits) | 83 |
-| `agents/debugger.py` | Debugger intel·ligent amb KB de reparacions + Anthropic fallback | 670 |
+| `bartolo/types.py` | Dataclasses: RepoAnalysis, ServiceInfo, ExecutionPlan, CommandStep... | 80 |
+| `bartolo/validator.py` | Validador de comandes shell (whitelist + blacklist) | 145 |
+| `bartolo/shell.py` | Execució shell, background, port checking, verify HTTP | 135 |
+| `bartolo/exceptions.py` | Excepcions: AgentError, ConfigError, DetectorError | 15 |
+| `bartolo/detectors/` | 12 detectors de stack + discovery + monorepo | ~900 |
+| `bartolo/planner.py` | Generació de plans d'execució deterministes | ~1000 |
+| `bartolo/provisioner.py` | Provisió automàtica de BDs via Docker | 150 |
+| `bartolo/executor.py` | Execució de plans, registry de serveis, rollback | 282 |
+| `bartolo/smoke.py` | Smoke tests adaptatius per framework | 90 |
+| `bartolo/preflight.py` | Pre-flight check (deps, disk, ports) | 80 |
+| `bartolo/runtime.py` | Detecció de versions runtime (.python-version, .nvmrc...) | 70 |
+| `bartolo/llm.py` | Client Ollama (ollama_chat_json, safe_json_loads) | 48 |
+| `bartolo/reporter.py` | Formatació de sortida (print_analysis, print_plan, print_final_summary) | 130 |
+| `bartolo/cli.py` | CLI (parse_args, main, show_logs, refresh_repo_config) | 320 |
+| `bartolo/repair/` | Debugger intel·ligent + KB reparacions + DeepSeek + Anthropic | ~700 |
+| `bartolo/kb/` | KB d'èxits (success_kb) | 90 |
+| `agents/debugger.py` | Compatibility shim → bartolo.repair | 16 |
+| `agents/success_kb.py` | Compatibility shim → bartolo.kb | 3 |
 | `dashboard.py` | UI web :9999 | 254 |
 | `bench.sh` | Bateria de proves automatitzada (11 repos complets, 6 quick) | 85 |
 | `stress_test.sh` | Bateria d'estrès amb repos complexos (7 repos, detecció) | 110 |
@@ -144,7 +161,49 @@ Els fallos típics són repos molt antics amb dependències trencades o monorepo
 
 ## Problemes resolts
 
-### ✅ [RESOLT 2026-05-11] v5.2 — 7 fixes de fiabilitat (aquesta sessió)
+### ✅ [RESOLT 2026-05-12] v6.0 — Refactor modular complet (3 fases)
+
+El monòlit `universal_repo_agent_v5.py` ha passat de 4067 → 1225 línies (-70%).
+Tota la lògica s'ha extret a 18 mòduls dins del paquet `bartolo/` (~4400 línies).
+
+**Fase 1 — Tipus, validador, shell, excepcions:**
+- `bartolo/types.py`: dataclasses (`RepoAnalysis`, `ServiceInfo`, `ExecutionPlan`, `CommandStep`, `ExecutionResult`, `StepError`)
+- `bartolo/validator.py`: `validate_command()`, `ShellCommand`, whitelist/blacklist
+- `bartolo/shell.py`: `run_shell()`, `maybe_background_command()`, `verify_http()`, `verify_port()`, `find_free_port()`
+- `bartolo/exceptions.py`: `AgentError`, `ConfigError`, `DetectorError`
+
+**Fase 2 — Detectors, planner, executor, provisioner:**
+- `bartolo/detectors/` (13 fitxers): 12 detectors de stack + `discovery.py` + `monorepo.py` + `__init__.py`
+- `bartolo/planner.py` (~1000 línies): `build_deterministic_plan()`, `choose_python_run_cmd()`, `choose_node_run_cmd()`, `choose_service_verify()`
+- `bartolo/provisioner.py`: `build_db_provision_steps()`, `inject_db_env_vars()`, `DB_DOCKER_CONFIGS`, `CLOUD_TO_LOCAL`
+- `bartolo/executor.py` (282 línies): `execute_plan()`, `register_service()`, `stop_services()`, `load_services_registry()`
+- `bartolo/smoke.py`: `run_smoke_tests()`, `_framework_endpoints()`
+- `bartolo/preflight.py`: `preflight_check()`
+- `bartolo/runtime.py`: `read_runtime_versions()`, `check_runtime_versions()`
+
+**Fase 3 — Repair, LLM, CLI, reporter:**
+- `bartolo/llm.py` (48 línies): `ollama_chat_json()`, `safe_json_loads()`, `OLLAMA_CHAT_URL`, `DEFAULT_MODEL`
+- `bartolo/reporter.py` (130 línies): `print_analysis()`, `print_plan()`, `print_final_summary()`
+- `bartolo/cli.py` (320 línies): `parse_args()`, `main()`, `show_logs()`, `refresh_repo_config()`
+- `bartolo/repair/kb.py` (80 línies): `RepairKB` — KB de reparacions basada en signatures d'error
+- `bartolo/repair/fallback.py` (60 línies): `_FALLBACK_MAP`, `_get_fallbacks()` — Plan B per errors comuns
+- `bartolo/repair/anthropic.py` (90 línies): `repair_with_anthropic()` — fallback a Claude API
+- `bartolo/repair/deepseek.py` (140 línies): `repair_with_deepseek()`, `repair_signature()` — reparació barata via DeepSeek
+- `bartolo/repair/debugger.py` (395 línies): `IntelligentDebugger` — loop de reparació 4 nivells (Plan B → KB → DeepSeek → Anthropic → Escalate)
+- `bartolo/kb/success.py` (82 línies): `lookup_plan()`, `record_success()` — KB d'èxits per stack
+- `agents/debugger.py` → compatibility shim (16 línies)
+- `agents/success_kb.py` → compatibility shim (3 línies)
+
+**Shims de compatibilitat:** `agents/debugger.py` i `agents/success_kb.py` re-exporten
+des de `bartolo.repair` i `bartolo.kb` per no trencar tests existents.
+
+**4 bugs corregits durant la Fase 3:**
+1. `.env` amb `xargs` fallava amb URLs (`://`) → `set -a && . ./.env && set +a`
+2. `inject_db_env_vars()` escrivia URLs sense `KEY=` → `KEY=VALUE` sempre
+3. Falsos positius de ports (`2009/06/25`, `to_list(1000)`) → `run_url` prioritari sobre `ports_hint`
+4. Test anthropic desfasat → actualitzat a nova API `repair_with_anthropic()`
+
+### ✅ [RESOLT 2026-05-11] v5.2 — 7 fixes de fiabilitat
 
 **F1 — Docker health check timeout:**
 `build_db_provision_steps()` feia 30×2s = 60s de health check, insuficient per

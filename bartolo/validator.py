@@ -75,7 +75,7 @@ def validate_command(command: str, repo_root: Optional[Path] = None) -> None:
     if not prefix:
         raise ValidationError("Comanda sense binari a executar")
     # Saltar wrappers de process management (setsid, nohup) i buscar el binari real
-    while prefix in {"setsid", "nohup"}:
+    while prefix in {"setsid", "nohup", "export"}:
         try:
             idx = tokens.index(prefix) + 1
         except ValueError:
@@ -137,7 +137,7 @@ class ShellCommand:
         if self.env:
             parts.extend(f"{k}={shlex.quote(v)}" for k, v in self.env.items())
         # Auto-load .env si existeix
-        parts.append("test -f .env && export $(grep -v '^#' .env | grep -v '^$' | xargs);")
+        parts.append("test -f .env && set -a && . ./.env && set +a;")
         cmd = f"{' '.join(parts)} {self.executable} {' '.join(self.args)}"
         if self.background:
             cmd = f"setsid nohup {cmd} > {self.log_file} 2>&1 < /dev/null & echo __AGENT_PID__=$!"

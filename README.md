@@ -1,17 +1,18 @@
-# Universal Repo Agent v5 — Guia en català
+# Universal Repo Agent v6 — Guia en català
 
 Un agent Python que clona, analitza i arrenca repositoris de GitHub/GitLab/Bitbucket
 a la teva màquina Ubuntu, utilitzant **Ollama** + **qwen2.5:14b** per refinar
 el pla d'execució i diagnosticar errors. L'usuari final el coneix com **"Bartolo"**.
 
 Inclou:
+- 🧱 **Arquitectura modular v6** — 18 mòduls al paquet `bartolo/` (~4400 línies), CLI de 1225 línies (-70% vs v5)
+- 🔧 **Debugger intel·ligent 4 nivells**: Plan B → KB reparacions → DeepSeek → Anthropic → Escalate
 - 🟢 Detector específic per **repositoris d'Emergent** (FastAPI + React + MongoDB)
 - 🐳 Mode **`--dockerize`** — tot el stack aïllat en contenidors
 - 🔑 **Caché de secrets** (`EMERGENT_LLM_KEY`, `OPENAI_API_KEY`, `STRIPE_*`…) a `~/.universal-agent/secrets.json`
 - 🧪 **Smoke tests automàtics** després d'arrencar (HTTP + pytest)
 - 🎨 **Dashboard web** (`dashboard.py`) per veure i controlar repos via navegador
 - 🧭 **Router d'intencions** (`bartolo_router.py`) L1 (regex) + L2 (LLM petit) per classificar peticions en llenguatge natural
-- 🔧 **Debugger intel·ligent** (`agents/debugger.py`) amb KB persistent de reparacions + multi-turn Ollama + fallback a Anthropic
 - 🚀 **Auto-resolució de conflictes de ports** — detecta ports ocupats i re-assigna automàticament per a tots els stacks
 
 ---
@@ -20,16 +21,19 @@ Inclou:
 
 | Fitxer | Descripció |
 |---|---|
-| `universal_repo_agent_v5.py` | Agent CLI, cor del sistema (4060 línies) |
+| `universal_repo_agent_v5.py` | Punt d'entrada CLI (1225 línies) — delega a `bartolo/` |
 | `agent_http_bridge.py` | Bridge HTTP (API REST al :9090) amb wizard, router dispatch, jobs async (1408 línies) |
+| `bartolo/` | **Paquet modular v6** (18 mòduls, ~4400 línies): detectors, planner, executor, repair, CLI, validació |
+| `bartolo/repair/` | Debugger intel·ligent + KB reparacions + DeepSeek + Anthropic (~700 línies) |
+| `bartolo/detectors/` | 12 detectors de stack + discovery + monorepo (~900 línies) |
+| `agents/debugger.py` | Compatibility shim → `bartolo.repair` (16 línies) |
+| `agents/success_kb.py` | Compatibility shim → `bartolo.kb` (3 línies) |
 | `openwebui_tool_repo_agent.py` | Tool per OpenWebUI: activar l'agent via xat (403 línies) |
 | `openwebui_tool_web_search.py` | Tool per OpenWebUI: cerca a Internet via DuckDuckGo |
 | `OPENWEBUI_SETUP.md` | Guia d'integració amb OpenWebUI (routing automàtic) |
 | `setup_ubuntu.sh` | Script d'instal·lació de totes les dependències a Ubuntu |
 | `bartolo_router.py` | Classificador d'intencions L1 (regex) + L2 (LLM) — 8 intents, 0ms L1 (253 línies) |
 | `bartolo_init.py` | CLI interactiva per muntar repos sense flags (168 línies) |
-| `agents/debugger.py` | Debugger intel·ligent amb KB de reparacions + Anthropic fallback (670 línies) |
-| `agents/success_kb.py` | KB d'èxits: reutilitza plans validats per stack (83 línies) |
 | `dashboard.py` | Dashboard web a `http://localhost:9999` (zero dependències) |
 | `bartolo_prompts.md` | Catàleg de prompts naturals que entén Bartolo |
 | `bench.sh` | Bateria de proves automatitzada (11 repos) |
@@ -198,7 +202,16 @@ Ideal per quan no vols recordar flags. Reutilitza l'agent per sota.
 
 ---
 
-## 8) Millores v5.2 — Fiabilitat i resolució de ports (2026-05-11)
+## 8) Novetats v6.0 — Refactor modular + DeepSeek (2026-05-12)
+
+- **Refactor modular complet**: el monòlit `universal_repo_agent_v5.py` ha passat de 4067 → 1225 línies (-70%). Tota la lògica s'ha extret a 18 mòduls dins del paquet `bartolo/` (~4400 línies).
+- **Debugger 4 nivells**: Plan B → KB reparacions → DeepSeek API (barat) → Anthropic API (potent) → Escalate. La KB de reparacions usa signatures d'error (fingerprint SHA-256) per reconèixer i reaplicar solucions que han funcionat abans.
+- **DeepSeek API**: client de reparació econòmic que normalitza errors (números→N, hex→HEX, paths→PATH) i valida les respostes abans d'executar-les.
+- **Mòduls nous**: `bartolo/llm.py`, `bartolo/reporter.py`, `bartolo/cli.py`, `bartolo/repair/` (6 mòduls), `bartolo/kb/`
+- **Shims de compatibilitat**: `agents/debugger.py` i `agents/success_kb.py` re-exporten des de `bartolo/`, tests existents sense canvis.
+- **4 bugs corregits**: `.env` amb `xargs` fràgil, `inject_db_env_vars` corrupte, falsos positius de ports (`2009/06/25` com a data), test anthropic desfasat.
+
+## 9) Millores v5.2 — Fiabilitat i resolució de ports (2026-05-11)
 
 - **Resolució de conflictes de ports per a tots els stacks**: abans només `node` i `python`
   rebien `PORT=` automàtic. Ara `deno`, `elixir`, `dotnet`, `go`, `ruby`, `php`, `java`
@@ -223,7 +236,7 @@ Ideal per quan no vols recordar flags. Reutilitza l'agent per sota.
 
 ---
 
-## 9) Millores de fiabilitat (v5.1)
+## 10) Millores de fiabilitat (v5.1)
 
 - **Pre-flight check**: comprova deps del sistema, espai lliure (>500 MB) i ports ocupats abans de generar el pla
 - **Plan B**: si un pas falla, prova alternatives predefinides (ex: `pnpm install` → `npm install`) abans d'escalar al debugger LLM
@@ -237,7 +250,7 @@ Ideal per quan no vols recordar flags. Reutilitza l'agent per sota.
 
 ---
 
-## 10) Opcions completes
+## 11) Opcions completes
 
 | Flag | Descripció |
 |---|---|
@@ -265,7 +278,7 @@ Ideal per quan no vols recordar flags. Reutilitza l'agent per sota.
 
 ---
 
-## 11) Seguretat
+## 12) Seguretat
 
 - Whitelist de prefixos permesos (`pip`, `npm`, `uvicorn`…) + suport camins com `.venv/bin/pip`
 - Whitelist de wrappers (`nohup`, `setsid`) amb validació del binari real
@@ -276,7 +289,7 @@ Ideal per quan no vols recordar flags. Reutilitza l'agent per sota.
 
 ---
 
-## 12) Stacks suportats
+## 13) Stacks suportats
 
 ### Detecció automàtica completa (12 detectors)
 - **Emergent** (FastAPI+React+Mongo) — pla específic optimitzat
@@ -300,7 +313,7 @@ Ideal per quan no vols recordar flags. Reutilitza l'agent per sota.
 
 ---
 
-## 13) Problemes freqüents
+## 14) Problemes freqüents
 
 ### Ollama no responent
 ```bash
@@ -331,7 +344,7 @@ Si només tens `npm`, usa `npm install --legacy-peer-deps` manualment.
 
 ---
 
-## 14) Novetats v5 respecte v4
+## 15) Novetats v5 respecte v4
 
 - Detector Emergent stack (FastAPI+React+Mongo) amb `.env` auto
 - Suport **GitLab** i **Bitbucket** tokens a més de GitHub
@@ -346,7 +359,7 @@ Si només tens `npm`, usa `npm install --legacy-peer-deps` manualment.
 
 ---
 
-## 15) Exemple complet end-to-end
+## 16) Exemple complet end-to-end
 
 ```bash
 # Un cop: instal·la tot
