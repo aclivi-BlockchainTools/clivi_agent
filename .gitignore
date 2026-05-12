@@ -13,3 +13,4 @@ nohup.out
 bench_results/
 .agent_logs/
 .DS_Store
+.superpowers/
