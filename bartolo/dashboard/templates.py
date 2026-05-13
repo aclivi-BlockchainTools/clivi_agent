@@ -336,6 +336,7 @@ pre.logs.output{max-height:300px;margin-top:8px}
 </main>
 <!-- Tool source modal -->
 <div class="modal-bg" id="tool-modal"><div class="modal"><h2 id="tool-modal-title"></h2><textarea class="sys-prompt" id="tool-modal-source" style="max-height:65vh;min-height:300px" spellcheck="false"></textarea><div style="margin-top:8px;display:flex;gap:8px"><button class="primary" onclick="saveToolSource()">Desar</button><button onclick="document.getElementById('tool-modal').classList.remove('show')">Tancar</button></div></div></div>
+<div id="toast-container"></div>
 
 <script>
 const WS_URL = 'ws://' + location.host + '/ws/chat';
@@ -344,7 +345,30 @@ let ws = null;
 let wsReconnectTimer = null;
 
 // ===== NAVIGATION =====
-let _reposInterval = null;
+let _intervals = {};
+let _lastChanges = {};
+
+function startPolling(tab, fn, fastMs, slowMs) {
+  stopPolling(tab);
+  _lastChanges[tab] = Date.now();
+  _intervals[tab] = setInterval(function() {
+    var elapsed = Date.now() - (_lastChanges[tab] || 0);
+    var interval = elapsed < 30000 ? (fastMs || 2000) : (slowMs || 15000);
+    // Only poll if tab is active
+    var sec = document.getElementById('tab-' + tab);
+    if (!sec || !sec.classList.contains('active')) return;
+    fn();
+  }, fastMs || 2000);
+}
+
+function stopPolling(tab) {
+  if (_intervals[tab]) { clearInterval(_intervals[tab]); _intervals[tab] = null; }
+}
+
+function bumpPolling(tab) {
+  _lastChanges[tab] = Date.now();
+}
+
 let _loadedTabs = {};
 
 function switchTab(t) {
@@ -357,15 +381,15 @@ function switchTab(t) {
   location.hash = 'tab-' + t;
   // Lazy load tab data
   if (!_loadedTabs[t]) { _loadedTabs[t] = true; loadTabData(t); }
-  // Manage repos polling
-  if (t === 'repos') { if (!_reposInterval) { _reposInterval = setInterval(loadStatus, 5000); } }
-  else { if (_reposInterval) { clearInterval(_reposInterval); _reposInterval = null; } }
+  // Stop polling for tabs we're leaving
+  if (t !== 'repos') stopPolling('repos');
+  if (t !== 'databases') stopPolling('databases');
 }
 
 function loadTabData(t) {
   if (t === 'models') loadModels();
-  if (t === 'repos') loadStatus();
-  if (t === 'databases') loadDatabases();
+  if (t === 'repos') { loadStatus(); startPolling('repos', loadStatus, 2000, 15000); }
+  if (t === 'databases') { loadDatabases(); startPolling('databases', loadDatabases, 5000, 30000); }
   if (t === 'secrets') loadSecrets();
   if (t === 'tools') loadTools();
 }
@@ -984,6 +1008,28 @@ document.getElementById('launch-form').addEventListener('submit', async (e) => {
     document.getElementById('launch-flash').innerHTML = '<div class="flash error">Error al llençar</div>';
   }
 });
+
+// ===== TOAST NOTIFICATIONS =====
+let _toastQueue = [];
+function showToast(msg, type) {
+  type = type || 'info';
+  _toastQueue.push({msg:msg, type:type});
+  if (_toastQueue.length > 3) _toastQueue.shift();
+  renderToasts();
+  setTimeout(function() {
+    _toastQueue = _toastQueue.filter(function(t) { return t.msg !== msg; });
+    renderToasts();
+  }, 5000);
+}
+function renderToasts() {
+  var container = document.getElementById('toast-container');
+  var h = '';
+  for (var i = 0; i < _toastQueue.length; i++) {
+    var t = _toastQueue[i];
+    h += '<div class="toast '+t.type+'"><span>'+esc(t.msg)+'</span><span class="toast-close" onclick="this.parentElement.remove()">x</span></div>';
+  }
+  container.innerHTML = h;
+}
 
 // ===== UTILS =====
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
