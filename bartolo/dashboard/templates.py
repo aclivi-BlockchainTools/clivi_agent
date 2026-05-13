@@ -170,12 +170,27 @@ pre.logs.output{max-height:300px;margin-top:8px}
 .tool-func .func-params{color:var(--muted);font-size:10px;margin-top:2px}
 /* Responsive */
 @media(max-width:700px){body{flex-direction:column}aside{width:100%;min-width:100%;flex-direction:row;overflow-x:auto;padding:4px 8px}aside .logo{display:none}aside a{border-left:0;border-bottom:2px solid transparent;white-space:nowrap}aside a.active{border-bottom-color:var(--accent);border-left:0}main section{padding:12px}}
+/* Overview */
+.overview-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+.stat-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px}
+.stat-card h3{color:var(--accent);font-size:13px;margin:0 0 8px}
+.stat-card .stat-num{font-size:32px;font-weight:bold;color:var(--fg)}
+.stat-card .stat-label{font-size:11px;color:var(--muted)}
+/* Global loading bar */
+#global-loading-bar{position:fixed;top:0;left:0;height:3px;background:var(--accent);transition:width .3s,opacity .3s;z-index:9999;width:0;opacity:0}
+/* Green flash */
+@keyframes greenFlash{0%{box-shadow:0 0 8px rgba(63,185,80,.6)}100%{box-shadow:0 0 0 0 rgba(63,185,80,0)}}
+.svc.flash-ok{animation:greenFlash 2s ease-out;border-left-color:var(--ok)!important}
+/* Logs stream */
+.logs-stream{background:var(--input-bg);border:1px solid var(--border);border-radius:6px;padding:8px;margin-top:8px;max-height:350px;overflow-y:auto;font-family:monospace;font-size:11px;color:var(--fg);white-space:pre-wrap;display:none}
+.logs-stream.show{display:block}
 """
 
 _HTML_BODY = """\
 <aside>
   <div class="logo">Bartolo CC</div>
-  <a href="#tab-chat" data-tab="chat" class="active">&#x1f4ac; Xat</a>
+  <a href="#tab-visio" data-tab="visio" class="active">Visió General</a>
+  <a href="#tab-chat" data-tab="chat">&#x1f4ac; Xat</a>
   <a href="#tab-models" data-tab="models">&#x1f9e0; Models</a>
   <a href="#tab-repos" data-tab="repos">&#x1f4e6; Repos</a>
   <a href="#tab-databases" data-tab="databases">&#x1f5c4; Databases</a>
@@ -185,8 +200,35 @@ _HTML_BODY = """\
   <a href="#tab-launch" data-tab="launch">&#x1f680; Llençar</a>
 </aside>
 <main>
+<!-- VISIÓ GENERAL -->
+<section id="tab-visio" class="active">
+  <h1>Visió General</h1>
+  <div class="sub">Estat del sistema</div>
+  <div class="overview-grid">
+    <div class="stat-card">
+      <h3>Repos</h3>
+      <div id="visio-repos"><span class="stat-num">—</span></div>
+    </div>
+    <div class="stat-card">
+      <h3>Models</h3>
+      <div id="visio-models"><span class="stat-num">—</span></div>
+    </div>
+    <div class="stat-card">
+      <h3>Databases</h3>
+      <div id="visio-databases"><span class="stat-num">—</span></div>
+    </div>
+    <div class="stat-card">
+      <h3>Sistema</h3>
+      <div id="visio-system"><span class="stat-num">—</span></div>
+    </div>
+    <div class="stat-card" style="grid-column:1/-1">
+      <h3>Events recents</h3>
+      <div id="visio-timeline" class="timeline">Carregant...</div>
+    </div>
+  </div>
+</section>
 <!-- CHAT -->
-<section id="tab-chat" class="active">
+<section id="tab-chat">
   <div class="chat-layout">
     <!-- Thread sidebar -->
     <div class="thread-sidebar" id="thread-sidebar">
@@ -330,7 +372,7 @@ _HTML_BODY = """\
 <div class="modal-bg" id="tool-modal"><div class="modal"><h2 id="tool-modal-title"></h2><textarea class="sys-prompt" id="tool-modal-source" style="max-height:65vh;min-height:300px" spellcheck="false"></textarea><pre id="tool-preview" class="logs" style="max-height:65vh;overflow:auto;display:none"></pre><div style="margin-top:8px;display:flex;gap:8px"><button class="primary" onclick="saveToolSource()">Desar</button><button class="small" onclick="toggleSyntaxPreview()">Preview</button><button onclick="document.getElementById('tool-modal').classList.remove('show')">Tancar</button></div></div></div>
 """
 
-_JS = r"""\
+_JS = r"""
 const WS_URL = 'ws://' + location.host + '/ws/chat';
 const CLIENT_ID = 'dash-' + Math.random().toString(36).slice(2,10);
 let ws = null;
@@ -376,6 +418,7 @@ function switchTab(t) {
   // Stop polling for tabs we're leaving
   if (t !== 'repos') stopPolling('repos');
   if (t !== 'databases') stopPolling('databases');
+  if (t !== 'visio') stopPolling('visio');
 }
 
 function loadTabData(t) {
@@ -384,6 +427,7 @@ function loadTabData(t) {
   if (t === 'databases') { loadDatabases(); startPolling('databases', loadDatabases, 5000, 30000); }
   if (t === 'secrets') loadSecrets();
   if (t === 'tools') loadTools();
+  if (t === 'visio') { loadOverview(); startPolling('visio', loadOverview, 5000, 15000); }
 }
 
 // ===== WEBSOCKET CHAT =====
@@ -501,7 +545,7 @@ document.getElementById('chat-send-btn').addEventListener('click', sendChat);
 // ===== THREAD MANAGEMENT =====
 async function loadThreads() {
   try {
-    const r = await fetch('/api/chat/threads');
+    const r = await apiFetch('/api/chat/threads');
     const data = await r.json();
     _threads = data.threads || [];
     renderThreadList();
@@ -548,7 +592,7 @@ async function selectThread(id, silent) {
   currentMsgEl = null;
   // Load messages from server
   try {
-    const r = await fetch('/api/chat/threads/' + encodeURIComponent(id));
+    const r = await apiFetch('/api/chat/threads/' + encodeURIComponent(id));
     const data = await r.json();
     if (data.messages) {
       data.messages.forEach(m => addChatMessage(m.role, m.content));
@@ -566,7 +610,7 @@ async function selectThread(id, silent) {
 
 async function createThread() {
   try {
-    const r = await fetch('/api/chat/threads', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+    const r = await apiFetch('/api/chat/threads', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
     const data = await r.json();
     if (data.ok && data.thread) {
       await loadThreads();
@@ -577,7 +621,7 @@ async function createThread() {
 
 async function deleteThread(id) {
   if (!confirm('Esborrar aquest fil de conversa?')) return;
-  await fetch('/api/chat/threads/' + encodeURIComponent(id), {method:'DELETE'});
+  await apiFetch('/api/chat/threads/' + encodeURIComponent(id), {method:'DELETE'});
   if (_currentThreadId === id) {
     _currentThreadId = null;
     document.getElementById('chat-messages').innerHTML = '';
@@ -590,7 +634,7 @@ async function deleteThread(id) {
 async function renameThread(id) {
   const title = prompt('Nou nom del fil:', '');
   if (!title) return;
-  await fetch('/api/chat/threads/' + encodeURIComponent(id), {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:title})});
+  await apiFetch('/api/chat/threads/' + encodeURIComponent(id), {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:title})});
   await loadThreads();
   if (_currentThreadId === id) {
     document.getElementById('chat-title').textContent = title;
@@ -609,7 +653,7 @@ document.getElementById('new-thread-btn').addEventListener('click', createThread
 document.getElementById('clear-threads-btn').addEventListener('click', async function() {
   if (!confirm('Esborrar TOTS els fils de conversa?')) return;
   for (const t of _threads) {
-    await fetch('/api/chat/threads/' + encodeURIComponent(t.id), {method:'DELETE'});
+    await apiFetch('/api/chat/threads/' + encodeURIComponent(t.id), {method:'DELETE'});
   }
   _threads = [];
   _currentThreadId = null;
@@ -622,7 +666,7 @@ document.getElementById('clear-threads-btn').addEventListener('click', async fun
 // Load input history from server
 async function loadInputHistory() {
   try {
-    const r = await fetch('/api/chat/history');
+    const r = await apiFetch('/api/chat/history');
     const data = await r.json();
     if (data.history) _inputHistory = data.history;
   } catch(e) {}
@@ -631,7 +675,7 @@ async function loadInputHistory() {
 // ===== MODELS =====
 async function loadModels() {
   try {
-    const r = await fetch('/api/models');
+    const r = await apiFetch('/api/models');
     const data = await r.json();
     renderModels(data);
   } catch(e) { document.getElementById('models-list').innerHTML = '<div class="empty">Error</div>'; }
@@ -659,7 +703,7 @@ document.getElementById('model-pull-btn').addEventListener('click', async () => 
   if (!name) return;
   const stat = document.getElementById('model-pull-status');
   stat.innerHTML = '<span class="spinner"></span> Descarregant ' + esc(name) + '...';
-  const r = await fetch('/api/models/pull', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:name})});
+  const r = await apiFetch('/api/models/pull', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:name})});
   const data = await r.json();
   stat.innerHTML = data.ok ? '<span class="badge ok">OK</span> ' + esc(data.message) : '<span class="badge bad">Error</span> ' + esc(data.message);
   if (data.ok) setTimeout(loadModels, 2000);
@@ -668,7 +712,7 @@ document.getElementById('model-pull-btn').addEventListener('click', async () => 
 // ===== REPOS =====
 async function loadStatus() {
   try {
-    const r = await fetch('/api/status');
+    const r = await apiFetch('/api/status');
     const data = await r.json();
     renderRepos(data);
   } catch(e) { document.getElementById('repos-content').innerHTML = '<div class="empty">Error</div>'; }
@@ -688,6 +732,7 @@ function renderRepos(data) {
       const alive = !!s.pid;
       sh += '<div class="svc '+(alive?'run':'stop')+'"><div class="svc-info"><strong>'+(alive?'&#x1f7e2; RUNNING':'&#x1f534; STOPPED')+' &middot; PID '+(s.pid||'?')+'</strong> &middot; step: <code>'+esc(s.step_id||'')+'</code><code>'+esc(s.command||'')+'</code></div>'+
         '<div class="actions"><button class="small" data-view-logs="'+escUrl(repo)+'/'+escUrl(s.step_id||'')+'">Logs</button>'+
+        \'<button class="small" data-live-logs="\'+escUrl(repo)+\'">En directe</button>\'+
         '<button class="small primary" data-restart-repo="'+escUrl(repo)+'">Restart</button>'+
         '<button class="small danger" data-stop-repo="'+escUrl(repo)+'">Stop</button></div></div>';
     }
@@ -699,14 +744,16 @@ function renderRepos(data) {
   document.getElementById('repos-content').innerHTML = h || '<div class="empty">Cap servei</div>';
 }
 async function stopRepo(name) {
-  await fetch('/api/stop', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'repo='+encodeURIComponent(name)});
+  await apiFetch('/api/stop', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'repo='+encodeURIComponent(name)});
+  flashService(name);
   loadStatus();
 }
 
 async function restartRepo(name) {
   showToast('Reiniciant ' + name + '...', 'info');
-  await fetch('/api/restart', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'repo='+encodeURIComponent(name)});
+  await apiFetch('/api/restart', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'repo='+encodeURIComponent(name)});
   showToast(name + ' reiniciat. Verifica la pestanya Repos.', 'ok');
+  flashService(name);
   bumpPolling('repos');
   setTimeout(loadStatus, 5000);
 }
@@ -717,7 +764,7 @@ async function loadTimeline(repo) {
   el.style.display = 'block';
   el.innerHTML = '<span class="spinner"></span> Carregant...';
   try {
-    const r = await fetch('/api/timeline/' + encodeURIComponent(repo));
+    const r = await apiFetch('/api/timeline/' + encodeURIComponent(repo));
     const data = await r.json();
     if (!data.events || !data.events.length) {
       el.innerHTML = '<div class="empty">Cap event</div>';
@@ -735,7 +782,7 @@ async function loadTimeline(repo) {
 // ===== DATABASES =====
 async function loadDatabases() {
   try {
-    const r = await fetch('/api/databases');
+    const r = await apiFetch('/api/databases');
     const data = await r.json();
     renderDatabases(data);
   } catch(e) { document.getElementById('db-content').innerHTML = '<div class="empty">Error</div>'; }
@@ -756,7 +803,7 @@ function renderDatabases(data) {
 // ===== SECRETS =====
 async function loadSecrets() {
   try {
-    const r = await fetch('/api/secrets');
+    const r = await apiFetch('/api/secrets');
     const data = await r.json();
     renderAiKeys(data.secrets || {}, data.known_key_types || []);
     renderOtherKeys(data.secrets || {});
@@ -822,12 +869,12 @@ function renderOtherKeys(secrets) {
 }
 
 function toggleSecret(key) {
-  fetch('/api/secrets/' + encodeURIComponent(key) + '/toggle', {method:'POST'})
+  apiFetch('/api/secrets/' + encodeURIComponent(key) + '/toggle', {method:'POST'})
     .then(() => loadSecrets());
 }
 
 async function testSecret(provider) {
-  const r = await fetch('/api/secrets/test/' + provider, {method:'POST'});
+  const r = await apiFetch('/api/secrets/test/' + provider, {method:'POST'});
   const d = await r.json();
   document.getElementById('secrets-flash').innerHTML = d.ok
     ? '<div class="flash ok">'+esc(d.message)+'</div>'
@@ -837,7 +884,7 @@ async function testSecret(provider) {
 async function saveSecret(key) {
   const v = document.getElementById('edit-val-'+key).value.trim();
   if (!v) return;
-  const r = await fetch('/api/secrets/' + encodeURIComponent(key), {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:v})});
+  const r = await apiFetch('/api/secrets/' + encodeURIComponent(key), {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:v})});
   const d = await r.json();
   document.getElementById('secrets-flash').innerHTML = d.ok
     ? '<div class="flash ok">Clau desada</div>'
@@ -846,7 +893,7 @@ async function saveSecret(key) {
 }
 
 async function deleteSecret(key) {
-  await fetch('/api/secrets/' + encodeURIComponent(key), {method:'DELETE'});
+  await apiFetch('/api/secrets/' + encodeURIComponent(key), {method:'DELETE'});
   loadSecrets();
 }
 
@@ -854,7 +901,7 @@ document.getElementById('secret-save-btn').addEventListener('click', async () =>
   const k = document.getElementById('secret-key').value.trim();
   const v = document.getElementById('secret-val').value.trim();
   if (!k || !v) return;
-  const r = await fetch('/api/secrets/' + encodeURIComponent(k), {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:v})});
+  const r = await apiFetch('/api/secrets/' + encodeURIComponent(k), {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:v})});
   const d = await r.json();
   document.getElementById('secrets-flash').innerHTML = d.ok
     ? '<div class="flash ok">Clau desada</div>'
@@ -890,8 +937,8 @@ function toggleSyntaxPreview() {
 async function loadTools() {
   try {
     const [toolsR, modelR] = await Promise.all([
-      fetch('/api/tools'),
-      fetch('/api/model/bartolo')
+      apiFetch('/api/tools'),
+      apiFetch('/api/model/bartolo')
     ]);
     const toolsData = await toolsR.json();
     const modelData = await modelR.json();
@@ -973,7 +1020,7 @@ function toggleToolCard(id) {
 }
 
 async function toggleTool(id) {
-  const r = await fetch('/api/tools/' + encodeURIComponent(id) + '/toggle', {method:'POST'});
+  const r = await apiFetch('/api/tools/' + encodeURIComponent(id) + '/toggle', {method:'POST'});
   const d = await r.json();
   document.getElementById('tools-flash').innerHTML = d.ok
     ? '<div class="flash ok">Tool '+esc(id)+' '+esc(d.status)+'. Reinicia OpenWebUI.</div>'
@@ -982,7 +1029,7 @@ async function toggleTool(id) {
 }
 
 async function viewToolSource(id, name) {
-  const r = await fetch('/api/tools/' + encodeURIComponent(id) + '/source');
+  const r = await apiFetch('/api/tools/' + encodeURIComponent(id) + '/source');
   const data = await r.json();
   document.getElementById('tool-modal-title').textContent = name || data.name || '';
   document.getElementById('tool-modal-source').value = data.source || '(no disponible)';
@@ -995,7 +1042,7 @@ async function saveToolSource() {
   const id = document.getElementById('tool-modal').getAttribute('data-tool-id');
   const source = document.getElementById('tool-modal-source').value;
   if (!id || !source) return;
-  const r = await fetch('/api/tools/' + encodeURIComponent(id) + '/source', {
+  const r = await apiFetch('/api/tools/' + encodeURIComponent(id) + '/source', {
     method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({source:source})
   });
   const d = await r.json();
@@ -1006,7 +1053,7 @@ async function saveToolSource() {
 
 document.getElementById('system-prompt-save').addEventListener('click', async () => {
   const sp = document.getElementById('system-prompt-text').value;
-  const r = await fetch('/api/model/bartolo', {
+  const r = await apiFetch('/api/model/bartolo', {
     method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({system_prompt:sp})
   });
   const d = await r.json();
@@ -1061,7 +1108,7 @@ document.getElementById('launch-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const fd = new FormData(e.target);
   const params = new URLSearchParams(fd);
-  const r = await fetch('/api/launch', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:params});
+  const r = await apiFetch('/api/launch', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:params});
   if (r.ok) {
     document.getElementById('launch-flash').innerHTML = '<div class="flash ok">Repo llençat! Mira la pestanya Repos.</div>';
     switchTab('repos'); localStorage.setItem('bartolo-tab','repos');
@@ -1142,11 +1189,17 @@ document.addEventListener('click', function(e) {
     }
     if (panel) {
       panel.textContent = 'Carregant...';
-      fetch('/api/logs?repo=' + encodeURIComponent(repo) + '&step=' + encodeURIComponent(step))
+      apiFetch('/api/logs?repo=' + encodeURIComponent(repo) + '&step=' + encodeURIComponent(step))
         .then(r => r.text())
         .then(text => { panel.textContent = text; })
         .catch(() => { panel.textContent = 'Error'; });
     }
+    return;
+  }
+  const liveEl = e.target.closest('[data-live-logs]');
+  if (liveEl) {
+    const repo = decodeURIComponent(liveEl.getAttribute('data-live-logs'));
+    connectLogsWS(repo);
     return;
   }
   // Repos - restart
@@ -1242,7 +1295,7 @@ loadThreads();
 loadInputHistory();
 
 // Init: activate stored tab and load its data
-const activeTab = localStorage.getItem('bartolo-tab') || 'chat';
+const activeTab = localStorage.getItem('bartolo-tab') || 'visio';
 switchTab(activeTab);
 
 // Restore last thread
@@ -1259,6 +1312,11 @@ if (lastThread) {
 
 // Global keyboard shortcuts
 document.addEventListener('keydown', function(e) {
+  if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key >= '1' && e.key <= '9') {
+    e.preventDefault();
+    var idx = parseInt(e.key) - 1;
+    if (idx < TAB_ORDER.length) switchTab(TAB_ORDER[idx]);
+  }
   if (e.ctrlKey && e.key === 'n') {
     e.preventDefault();
     createThread();
@@ -1268,6 +1326,116 @@ document.addEventListener('keydown', function(e) {
     if (_currentThreadId) deleteThread(_currentThreadId);
   }
 });
+// ===== OVERVIEW =====
+const TAB_ORDER = ['visio','chat','models','repos','databases','secrets','tools','shell','launch'];
+
+async function loadOverview() {
+  try {
+    const [statusR, modelsR, dbR] = await Promise.all([
+      apiFetch('/api/status'),
+      apiFetch('/api/models'),
+      apiFetch('/api/databases')
+    ]);
+    const status = await statusR.json();
+    const models = await modelsR.json();
+    const db = await dbR.json();
+    renderOverview(status, models, db);
+  } catch(e) {}
+}
+
+function renderOverview(status, models, db) {
+  const repos = Object.entries(status).filter(function(e) { return !e[0].startsWith('_'); });
+  let running = 0, stopped = 0;
+  repos.forEach(function(e) {
+    var svcs = e[1];
+    if (!svcs || !svcs.length) return;
+    svcs.forEach(function(s) { s.pid ? running++ : stopped++; });
+  });
+  document.getElementById('visio-repos').innerHTML =
+    '<span class="stat-num">'+running+'</span><span class="stat-label"> actius</span> &middot; ' +
+    '<span class="stat-num" style="color:var(--muted)">'+stopped+'</span><span class="stat-label"> aturats</span>';
+
+  var modelCount = (models.models || []).length;
+  var modelNames = (models.models || []).slice(0,3).map(function(m) { return m.name; }).join(', ');
+  document.getElementById('visio-models').innerHTML =
+    '<span class="stat-num">'+modelCount+'</span><span class="stat-label"> models</span>' +
+    (modelNames ? '<div style="font-size:11px;color:var(--muted);margin-top:4px">'+esc(modelNames)+'</div>' : '');
+
+  var dbCount = (db.containers || []).length;
+  document.getElementById('visio-databases').innerHTML =
+    '<span class="stat-num">'+dbCount+'</span><span class="stat-label"> contenidors</span>';
+
+  var info = document.getElementById('sys-info');
+  var uptime = Math.floor((Date.now()/1000) - parseInt(info.dataset.startTime));
+  var h = Math.floor(uptime/3600), m = Math.floor((uptime%3600)/60);
+  document.getElementById('visio-system').innerHTML =
+    '<span class="stat-num">'+info.dataset.hostname+'</span>' +
+    '<div class="stat-label">Python '+info.dataset.python+' &middot; uptime '+h+'h '+m+'m</div>';
+}
+
+// ===== GLOBAL LOADING INDICATOR =====
+let _loadingCount = 0;
+function startLoading() { _loadingCount++; updateLoadingBar(); }
+function stopLoading() { _loadingCount = Math.max(0, _loadingCount - 1); updateLoadingBar(); }
+function updateLoadingBar() {
+  var bar = document.getElementById('global-loading-bar');
+  bar.style.width = _loadingCount > 0 ? '100%' : '0';
+  bar.style.opacity = _loadingCount > 0 ? '1' : '0';
+}
+async function apiFetch(url, opts) {
+  startLoading();
+  try { return await fetch(url, opts); }
+  finally { stopLoading(); }
+}
+
+// ===== GREEN FLASH =====
+function flashService(repo) {
+  var cards = document.querySelectorAll('.card');
+  cards.forEach(function(card) {
+    var h2 = card.querySelector('h2');
+    if (h2 && h2.textContent === repo) {
+      var svcs = card.querySelectorAll('.svc');
+      svcs.forEach(function(svc) {
+        svc.classList.add('flash-ok');
+        setTimeout(function() { svc.classList.remove('flash-ok'); }, 2000);
+      });
+    }
+  });
+}
+
+// ===== LIVE LOGS =====
+let _logsWs = null;
+function connectLogsWS(repo) {
+  if (_logsWs) _logsWs.close();
+  var safeId = 'logs-stream-' + repo.replace(/[^a-zA-Z0-9]/g, '_');
+  var panel = document.getElementById(safeId);
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.id = safeId;
+    panel.className = 'logs-stream show';
+    var reposContent = document.getElementById('repos-content');
+    reposContent.insertBefore(panel, reposContent.firstChild);
+  }
+  panel.textContent = 'Connectant...\n';
+  _logsWs = new WebSocket('ws://' + location.host + '/ws/logs/' + encodeURIComponent(repo));
+  _logsWs.onmessage = function(e) {
+    var d = JSON.parse(e.data);
+    if (d.type === 'init') {
+      panel.textContent = d.lines.join('\n') + '\n';
+    } else if (d.type === 'line') {
+      panel.textContent += d.text + '\n';
+      panel.scrollTop = panel.scrollHeight;
+    }
+  };
+  _logsWs.onclose = function() {
+    panel.textContent += '\n--- logs desconnectats ---';
+  };
+}
+
+function disconnectLogsWS() {
+  if (_logsWs) { _logsWs.close(); _logsWs = null; }
+}
+
 """
 
 INDEX_HTML = (
@@ -1276,6 +1444,8 @@ INDEX_HTML = (
     '<title>Bartolo Control Center</title>\n<style>\n'
     + _CSS +
     '\n</style>\n</head>\n<body>\n'
+    '<div id="global-loading-bar"></div>\n'
+    '<div id="sys-info" data-hostname="HOST" data-python="PY" data-start-time="TIME" hidden></div>\n'
     + _HTML_BODY +
     '\n<div id="toast-container"></div>\n<script>\n'
     + _JS +
@@ -1284,7 +1454,17 @@ INDEX_HTML = (
 
 
 def render_index() -> str:
-    return INDEX_HTML
+    import socket
+    import sys
+    import time as _time
+    _hostname = socket.gethostname()
+    _python_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    _start = int(_time.time())
+    html = INDEX_HTML
+    html = html.replace('data-hostname="HOST"', f'data-hostname="{_hostname}"')
+    html = html.replace('data-python="PY"', f'data-python="{_python_ver}"')
+    html = html.replace('data-start-time="TIME"', f'data-start-time="{_start}"')
+    return html
 
 
 def render_logs(repo: str, step: str, workspace) -> str:
