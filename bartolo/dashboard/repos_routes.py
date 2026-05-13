@@ -7,9 +7,10 @@ import subprocess
 import threading
 from pathlib import Path
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from urllib.parse import parse_qs
+import asyncio
 
 THIS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = THIS_DIR.parent.parent
@@ -131,3 +132,56 @@ async def api_timeline(repo: str):
         except Exception:
             pass
     return {"repo": repo, "events": events[-50:]}
+
+
+@router.websocket("/ws/logs/{repo}")
+async def websocket_logs(ws: WebSocket, repo: str):
+    await ws.accept()
+    log_dir = DEFAULT_WORKSPACE / LOG_DIRNAME
+    positions = {}  # filename -> last read byte position
+    # Send initial tail
+    if log_dir.exists():
+        all_lines = []
+        for f in sorted(log_dir.glob(f"*{repo}*.log"), key=lambda x: x.stat().st_mtime):
+            try:
+                content = f.read_text(encoding="utf-8", errors="ignore")
+                lines = content.split("\n")
+                all_lines.extend(lines[-50:])
+                positions[str(f)] = f.stat().st_size
+            except Exception:
+                pass
+        if all_lines:
+            await ws.send_json({"type": "init", "lines": all_lines[-50:]})
+    try:
+        while True:
+            await asyncio.sleep(0.5)
+            if not log_dir.exists():
+                continue
+            new_lines = []
+            for f in sorted(log_dir.glob(f"*{repo}*.log"), key=lambda x: x.stat().st_mtime):
+                fkey = str(f)
+                try:
+                    size = f.stat().st_size
+                    pos = positions.get(fkey, 0)
+                    if size > pos:
+                        with open(f, "rb") as fh:
+                            fh.seek(pos)
+                            chunk = fh.read(size - pos)
+                            lines = chunk.decode("utf-8", errors="ignore").split("\n")
+                            for line in lines:
+                                if line.strip():
+                                    new_lines.append(line)
+                        positions[fkey] = size
+                    elif pos == 0 and fkey not in positions:
+                        # New file detected
+                        content = f.read_text(encoding="utf-8", errors="ignore")
+                        lines = [l for l in content.split("\n") if l.strip()]
+                        if lines:
+                            new_lines.extend(lines[-10:])
+                        positions[fkey] = size
+                except Exception:
+                    pass
+            for line in new_lines:
+                await ws.send_json({"type": "line", "text": line})
+    except (WebSocketDisconnect, Exception):
+        pass
