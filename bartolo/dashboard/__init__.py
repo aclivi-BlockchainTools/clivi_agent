@@ -30,7 +30,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Bartolo Dashboard",
         description="Centre de control de Bartolo — xat, models, repos, API keys",
-        version="2.0.0",
+        version="2.2.0",
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
