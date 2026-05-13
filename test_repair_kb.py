@@ -21,7 +21,7 @@ def test_keywords_extraction():
     stderr = "Traceback (most recent call last):\n  File 'main.py', line 42\nModuleNotFoundError: No module named 'requests'"
     kws = kb._extract_keywords(stderr)
     assert "ModuleNotFoundError" in kws or "requests" in kws
-    assert len(kws) <= 3
+    assert len(kws) <= 5
 
 def test_save_and_lookup():
     with tempfile.TemporaryDirectory() as tmp:
@@ -48,7 +48,7 @@ def test_markdown_written_on_save():
 def test_markdown_for_stack_empty():
     with tempfile.TemporaryDirectory() as tmp:
         kb = RepairKB(kb_dir=tmp)
-        assert kb.markdown_for_stack("python") == ""
+        assert kb.markdown_for_stack("elixir") == ""
 
 def test_markdown_for_stack_after_save():
     with tempfile.TemporaryDirectory() as tmp:

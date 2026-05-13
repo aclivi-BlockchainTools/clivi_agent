@@ -263,6 +263,12 @@ class IntelligentDebugger:
         if step.category == "run":
             fix_cmd, is_bg = maybe_background_command(command)
 
+        if not is_bg:
+            cwd_path = Path(step.cwd)
+            env_file = cwd_path / ".env"
+            if env_file.exists():
+                fix_cmd = f"test -f .env && set -a && . ./.env && set +a; {fix_cmd}"
+
         result = run_shell(fix_cmd, cwd=Path(step.cwd), repo_root=repo_root)
         result.step_id = step.id
         result.repaired = True

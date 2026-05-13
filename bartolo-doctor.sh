@@ -212,6 +212,42 @@ fix_arrenca_openwebui() {
     return 1
 }
 
+fix_arrenca_dashboard() {
+    fix_attempt "Arrencar dashboard"
+    if ! ask_confirm "Arrencar dashboard a port 9999 (systemd user service)"; then
+        return 1
+    fi
+    if [ ! -f "$AGENT_DIR/dashboard.py" ]; then
+        fix_fail "No s'ha trobat: $AGENT_DIR/dashboard.py"
+        return 1
+    fi
+    # Install systemd service if not present
+    local service_file="$HOME/.config/systemd/user/dashboard.service"
+    if [ ! -f "$service_file" ] && [ -f "$AGENT_DIR/dashboard.service" ]; then
+        cp "$AGENT_DIR/dashboard.service" "$service_file"
+        systemctl --user daemon-reload
+    fi
+    if systemctl --user enable --now dashboard.service 2>/dev/null; then
+        sleep 1
+        if curl -s --max-time 3 "http://localhost:9999/api/status" >/dev/null 2>&1; then
+            fix_done "Dashboard operatiu a http://localhost:9999"
+            return 0
+        fi
+        fix_fail "Service arrencat pero dashboard no respon a port 9999"
+        return 1
+    fi
+    # Fallback: direct launch
+    nohup python3 "$AGENT_DIR/dashboard.py" --port 9999 > /tmp/dashboard_doctor.log 2>&1 &
+    disown
+    sleep 2
+    if curl -s --max-time 3 "http://localhost:9999/api/status" >/dev/null 2>&1; then
+        fix_done "Dashboard arrencat directament (no systemd)"
+        return 0
+    fi
+    fix_fail "Dashboard no ha arrencat"
+    return 1
+}
+
 # =============================================================================
 # Inici
 # =============================================================================
@@ -428,6 +464,22 @@ log "  ${GRAY}1. Settings → Workspace → Tools → Universal Repo Agent${NC}"
 log "  ${GRAY}   Versió esperada: ${BOLD}$EXPECTED_TOOL_VERSION${NC}"
 log "  ${GRAY}2. Settings → Admin → Models → Qwen → Function Calling: ON${NC}"
 log "  ${GRAY}3. Al xat: tool 'Universal Repo Agent' activada (botó +)${NC}"
+
+# 8. Dashboard
+header "8. Dashboard"
+if curl -s --max-time 3 "http://localhost:9999/api/status" >/dev/null 2>&1; then
+    pass "Dashboard respon a http://localhost:9999"
+elif systemctl --user is-active dashboard.service >/dev/null 2>&1; then
+    fail "Dashboard service actiu però no respon a port 9999"
+    MANUAL_FIXES+=("journalctl --user -u dashboard.service -n 20")
+else
+    warn "Dashboard no arrencat"
+    if [ $FIX_MODE -eq 1 ]; then
+        fix_arrenca_dashboard
+    else
+        MANUAL_FIXES+=("cp dashboard.service ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now dashboard.service")
+    fi
+fi
 
 # Veredicte
 echo ""

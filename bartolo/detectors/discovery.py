@@ -79,8 +79,13 @@ def detect_ports_from_text(text: str) -> List[int]:
     ports: List[int] = []
     for m in re.finditer(r'\b([1-9]\d{3,4})\b', text):
         port = int(m.group(1))
-        if port not in ports:
-            ports.append(port)
+        if port in ports:
+            continue
+        if 1900 <= port <= 2100:  # anys
+            continue
+        if port > 65535:  # port invàlid
+            continue
+        ports.append(port)
     return ports
 
 

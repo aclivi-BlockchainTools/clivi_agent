@@ -18,6 +18,47 @@ _STOP_WORDS = {
 }
 _DEFAULT_KB_DIR = Path.home() / ".universal-agent"
 
+_SEED_ENTRIES = [
+    # (stack, error_type, keywords, fix_command)
+    # Keywords han de ser tokens que SEMPRE apareixen a l'error (1-2, molt distintius)
+    ("python", "missing_dependency", ["ModuleNotFoundError"],
+     "pip install --break-system-packages <missing_pkg>"),
+    ("python", "missing_dependency", ["ImportError"],
+     "pip install --break-system-packages <missing_pkg>"),
+    ("python", "wrong_version", ["SyntaxError"],
+     "python3 --version && pip list 2>/dev/null | head -20"),
+    ("python", "permission_error", ["PermissionError"],
+     "chmod -R u+rw ."),
+    ("python", "missing_env_var", ["KeyError"],
+     "test -f .env && set -a && . ./.env && set +a; python3 -c 'import os; print(os.environ)'"),
+    ("python", "port_conflict", ["Address", "already"],
+     "fuser -k <port>/tcp 2>/dev/null; sleep 1"),
+    ("python", "broken_repo", ["requirements.txt"],
+     "find . -name 'requirements*.txt' -type f"),
+    ("node", "missing_dependency", ["Cannot", "find"],
+     "npm install"),
+    ("node", "missing_dependency", ["MODULE_NOT_FOUND"],
+     "npm install"),
+    ("node", "wrong_version", ["requires", "node"],
+     "node --version && npm --version"),
+    ("node", "port_conflict", ["EADDRINUSE"],
+     "fuser -k <port>/tcp 2>/dev/null; sleep 1"),
+    ("node", "wrong_config", ["ENOENT"],
+     "npm install --legacy-peer-deps"),
+    ("go", "missing_dependency", ["cannot", "find"],
+     "go mod tidy && go mod download"),
+    ("go", "wrong_version", ["go.mod", "incompatible"],
+     "go mod tidy"),
+    ("generic", "network_error", ["Connection", "refused"],
+     "sleep 3 && nc -z localhost <port> && echo 'ready' || echo 'still down'"),
+    ("generic", "missing_dependency", ["command", "found"],
+     "which <binary> 2>/dev/null || apt list --installed 2>/dev/null | grep <binary>"),
+    ("generic", "port_conflict", ["already", "use"],
+     "fuser -k <port>/tcp 2>/dev/null; sleep 1"),
+    ("generic", "permission_error", ["EACCES"],
+     "chmod -R u+rw ."),
+]
+
 
 def _extract_keywords(text: str) -> List[str]:
     tokens = re.findall(r"[A-Za-z][A-Za-z0-9_]*", text)
@@ -27,7 +68,7 @@ def _extract_keywords(text: str) -> List[str]:
             continue
         seen[t] = seen.get(t, 0) + 1
     sorted_tokens = sorted(seen, key=lambda k: -seen[k])
-    return sorted_tokens[:3]
+    return sorted_tokens[:5]
 
 
 class RepairKB:
@@ -35,6 +76,14 @@ class RepairKB:
         self._dir = Path(kb_dir) if kb_dir else _DEFAULT_KB_DIR
         self._dir.mkdir(parents=True, exist_ok=True)
         self._json_path = self._dir / "repair_kb.json"
+        self._seed()
+
+    def _seed(self) -> None:
+        data = self._load()
+        if data:
+            return
+        for stack, error_type, keywords, fix_command in _SEED_ENTRIES:
+            self.save(stack, error_type, keywords, fix_command, source="builtin")
 
     def _extract_keywords(self, text: str) -> List[str]:
         return _extract_keywords(text)
@@ -67,10 +116,11 @@ class RepairKB:
         data = self._load()
         entry = data.get(fp, {})
         new_count = entry.get("success_count", 0) + 1
+        filtered_kws = _extract_keywords(" ".join(keywords))
         data[fp] = {
             "stack": stack,
             "error_type": error_type,
-            "keywords": keywords,
+            "keywords": filtered_kws if filtered_kws else keywords,
             "fix_command": fix_command if new_count == 1 else entry.get("fix_command", fix_command),
             "success_count": new_count,
             "last_seen": datetime.now().isoformat(timespec="seconds"),
