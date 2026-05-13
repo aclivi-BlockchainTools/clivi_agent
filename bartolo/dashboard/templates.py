@@ -302,20 +302,18 @@ pre.logs.output{max-height:300px;margin-top:8px}
 <!-- SHELL -->
 <section id="tab-shell">
   <h1>&#x2328; Shell Exec</h1>
-  <div class="sub">Token de seguretat (caduca 120s)</div>
+  <div class="sub">WebSocket en temps real</div>
   <div id="shell-flash"></div>
   <div class="card">
     <div class="row">
       <input type="text" id="shell-cmd" placeholder="docker ps, ollama list, pwd..." style="flex:1">
-      <button id="shell-gen-btn" class="primary">Generar Token</button>
+      <button id="shell-exec-btn" class="primary">Executar (Enter)</button>
     </div>
-    <div id="shell-token-area" style="display:none;margin-top:8px">
-      <div class="row">
-        <input type="text" id="shell-token-confirm" placeholder="Enganxa el token per confirmar" style="flex:1">
-        <button id="shell-exec-btn" class="danger">Executar</button>
-      </div>
+    <pre class="logs output" id="shell-output" style="min-height:200px;max-height:400px"></pre>
+    <div id="shell-history-area" style="margin-top:8px;display:none">
+      <div style="color:var(--muted);font-size:10px;margin-bottom:4px">Historial:</div>
+      <div id="shell-history-list" style="font-size:11px"></div>
     </div>
-    <pre class="logs output" id="shell-output" style="display:none"></pre>
   </div>
 </section>
 <!-- LAUNCH -->
@@ -335,7 +333,7 @@ pre.logs.output{max-height:300px;margin-top:8px}
 </section>
 </main>
 <!-- Tool source modal -->
-<div class="modal-bg" id="tool-modal"><div class="modal"><h2 id="tool-modal-title"></h2><textarea class="sys-prompt" id="tool-modal-source" style="max-height:65vh;min-height:300px" spellcheck="false"></textarea><div style="margin-top:8px;display:flex;gap:8px"><button class="primary" onclick="saveToolSource()">Desar</button><button onclick="document.getElementById('tool-modal').classList.remove('show')">Tancar</button></div></div></div>
+<div class="modal-bg" id="tool-modal"><div class="modal"><h2 id="tool-modal-title"></h2><textarea class="sys-prompt" id="tool-modal-source" style="max-height:65vh;min-height:300px" spellcheck="false"></textarea><pre id="tool-preview" class="logs" style="max-height:65vh;overflow:auto;display:none"></pre><div style="margin-top:8px;display:flex;gap:8px"><button class="primary" onclick="saveToolSource()">Desar</button><button class="small" onclick="toggleSyntaxPreview()">Preview</button><button onclick="document.getElementById('tool-modal').classList.remove('show')">Tancar</button></div></div></div>
 <div id="toast-container"></div>
 
 <script>
@@ -696,15 +694,48 @@ function renderRepos(data) {
       const alive = !!s.pid;
       sh += '<div class="svc '+(alive?'run':'stop')+'"><div class="svc-info"><strong>'+(alive?'&#x1f7e2; RUNNING':'&#x1f534; STOPPED')+' &middot; PID '+(s.pid||'?')+'</strong> &middot; step: <code>'+esc(s.step_id||'')+'</code><code>'+esc(s.command||'')+'</code></div>'+
         '<div class="actions"><button class="small" data-view-logs="'+escUrl(repo)+'/'+escUrl(s.step_id||'')+'">Logs</button>'+
+        '<button class="small primary" data-restart-repo="'+escUrl(repo)+'">Restart</button>'+
         '<button class="small danger" data-stop-repo="'+escUrl(repo)+'">Stop</button></div></div>';
     }
-    h += '<div class="card"><h2>'+esc(repo)+'</h2>'+sh+'</div>';
+    h += '<div class="card"><h2>'+esc(repo)+'</h2>'+sh+
+      '<div class="timeline" id="tl-'+escUrl(repo)+'" style="display:none;margin-top:8px"></div>'+
+      '<div style="margin-top:4px"><button class="small" data-load-timeline="'+escUrl(repo)+'">Timeline</button></div>'+
+      '</div>';
   }
   document.getElementById('repos-content').innerHTML = h || '<div class="empty">Cap servei</div>';
 }
 async function stopRepo(name) {
   await fetch('/api/stop', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'repo='+encodeURIComponent(name)});
   loadStatus();
+}
+
+async function restartRepo(name) {
+  showToast('Reiniciant ' + name + '...', 'info');
+  await fetch('/api/restart', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'repo='+encodeURIComponent(name)});
+  showToast(name + ' reiniciat. Verifica la pestanya Repos.', 'ok');
+  bumpPolling('repos');
+  setTimeout(loadStatus, 5000);
+}
+
+async function loadTimeline(repo) {
+  const el = document.getElementById('tl-' + repo.replace(/[^a-zA-Z0-9]/g, '_'));
+  if (!el) return;
+  el.style.display = 'block';
+  el.innerHTML = '<span class="spinner"></span> Carregant...';
+  try {
+    const r = await fetch('/api/timeline/' + encodeURIComponent(repo));
+    const data = await r.json();
+    if (!data.events || !data.events.length) {
+      el.innerHTML = '<div class="empty">Cap event</div>';
+      return;
+    }
+    let h = '';
+    for (const e of data.events) {
+      const cls = e.level === 'error' ? 'bad' : (e.level === 'ok' ? 'ok' : '');
+      h += '<div class="timeline-item '+cls+'"><span class="tl-time">'+esc(e.time||'')+'</span> <span class="tl-event">'+esc(e.event)+'</span></div>';
+    }
+    el.innerHTML = h;
+  } catch(e) { el.innerHTML = '<div class="empty">Error</div>'; }
 }
 
 // ===== DATABASES =====
@@ -840,6 +871,28 @@ document.getElementById('secret-save-btn').addEventListener('click', async () =>
 });
 
 // ===== TOOLS =====
+function highlightPython(code) {
+  return code
+    .replace(/(["]{3}[\s\S]*?["]{3}|'{3}[\s\S]*?'{3})/g, '<span class="syn-string">$1</span>')
+    .replace(/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/g, '<span class="syn-string">$1</span>')
+    .replace(/(#.*$)/gm, '<span class="syn-comment">$1</span>')
+    .replace(/\b(def|class|import|from|return|if|else|elif|for|while|try|except|finally|with|as|yield|async|await|raise|pass|break|continue|and|or|not|in|is|None|True|False)\b/g, '<span class="syn-keyword">$1</span>')
+    .replace(/\b([a-zA-Z_]\w*)\s*\(/g, '<span class="syn-func">$1</span>(');
+}
+
+function toggleSyntaxPreview() {
+  var el = document.getElementById('tool-modal-source');
+  var preview = document.getElementById('tool-preview');
+  if (el.style.display === 'none') {
+    el.style.display = '';
+    preview.style.display = 'none';
+  } else {
+    el.style.display = 'none';
+    preview.style.display = 'block';
+    preview.innerHTML = highlightPython(el.value);
+  }
+}
+
 async function loadTools() {
   try {
     const [toolsR, modelR] = await Promise.all([
@@ -968,30 +1021,45 @@ document.getElementById('system-prompt-save').addEventListener('click', async ()
     : '<div class="flash error">'+esc(d.error)+'</div>';
 });
 
-// ===== SHELL =====
-document.getElementById('shell-gen-btn').addEventListener('click', async () => {
+// ===== SHELL (WebSocket) =====
+let shellWs = null;
+function shellExec() {
   const cmd = document.getElementById('shell-cmd').value.trim();
   if (!cmd) return;
-  const r = await fetch('/api/exec', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd='+encodeURIComponent(cmd)});
-  const data = await r.json();
-  if (data.token) {
-    document.getElementById('shell-token-area').style.display = 'block';
-    document.getElementById('shell-output').style.display = 'none';
-    document.getElementById('shell-flash').innerHTML = '<div class="flash info">Token generat. Enganxa\'l per confirmar.</div>';
-  } else {
-    document.getElementById('shell-flash').innerHTML = '<div class="flash error">'+esc(data.error||'Error')+'</div>';
-  }
-});
-document.getElementById('shell-exec-btn').addEventListener('click', async () => {
-  const token = document.getElementById('shell-token-confirm').value.trim();
-  const cmd = document.getElementById('shell-cmd').value.trim();
-  if (!token||!cmd) return;
-  const r = await fetch('/api/exec/confirm', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'token='+encodeURIComponent(token)+'&cmd='+encodeURIComponent(cmd)});
-  const data = await r.json();
   const out = document.getElementById('shell-output');
-  out.style.display = 'block';
-  out.textContent = data.output || data.error || '';
-  document.getElementById('shell-token-area').style.display = 'none';
+  out.textContent = '$ ' + cmd + '\n';
+  if (!shellWs || shellWs.readyState !== WebSocket.OPEN) {
+    shellWs = new WebSocket('ws://' + location.host + '/ws/shell');
+    shellWs.onmessage = function(e) {
+      const d = JSON.parse(e.data);
+      if (d.type === 'output') out.textContent += d.line + '\n';
+      else if (d.type === 'done') {
+        out.textContent += '\n[returncode: ' + d.returncode + ']';
+        if (d.history) renderShellHistory(d.history);
+      }
+      else if (d.type === 'error') out.textContent += 'ERROR: ' + d.error + '\n';
+      out.scrollTop = out.scrollHeight;
+    };
+    shellWs.onclose = function() { shellWs = null; };
+    shellWs.onopen = function() { shellWs.send(JSON.stringify({cmd:cmd})); };
+  } else {
+    shellWs.send(JSON.stringify({cmd:cmd}));
+  }
+  document.getElementById('shell-cmd').value = '';
+}
+
+function renderShellHistory(history) {
+  var area = document.getElementById('shell-history-area');
+  area.style.display = 'block';
+  var list = document.getElementById('shell-history-list');
+  list.innerHTML = history.slice(-10).map(function(c, i) {
+    return '<div style="cursor:pointer;color:var(--accent);padding:2px 0" data-shell-history="'+i+'">'+esc(c)+'</div>';
+  }).join('');
+}
+
+document.getElementById('shell-exec-btn').addEventListener('click', shellExec);
+document.getElementById('shell-cmd').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') { e.preventDefault(); shellExec(); }
 });
 
 // ===== LAUNCH =====
@@ -1068,7 +1136,36 @@ document.addEventListener('click', function(e) {
     const parts = logEl.getAttribute('data-view-logs').split('/');
     const repo = decodeURIComponent(parts[0]);
     const step = decodeURIComponent(parts.slice(1).join('/'));
-    window.open('/api/logs?repo=' + encodeURIComponent(repo) + '&step=' + encodeURIComponent(step));
+    // Find or create logs panel
+    let panelId = 'logs-' + repo.replace(/[^a-zA-Z0-9]/g, '_');
+    let panel = document.getElementById(panelId);
+    let svcDiv = logEl.closest('.svc');
+    if (!panel && svcDiv) {
+      panel = document.createElement('div');
+      panel.id = panelId;
+      panel.className = 'logs-panel show';
+      svcDiv.appendChild(panel);
+    }
+    if (panel) {
+      panel.textContent = 'Carregant...';
+      fetch('/api/logs?repo=' + encodeURIComponent(repo) + '&step=' + encodeURIComponent(step))
+        .then(r => r.text())
+        .then(text => { panel.textContent = text; })
+        .catch(() => { panel.textContent = 'Error'; });
+    }
+    return;
+  }
+  // Repos - restart
+  const restartEl = e.target.closest('[data-restart-repo]');
+  if (restartEl) {
+    const repo = decodeURIComponent(restartEl.getAttribute('data-restart-repo'));
+    restartRepo(repo);
+    return;
+  }
+  // Repos - timeline
+  const tlEl = e.target.closest('[data-load-timeline]');
+  if (tlEl) {
+    loadTimeline(decodeURIComponent(tlEl.getAttribute('data-load-timeline')));
     return;
   }
   // Secrets - toggle
