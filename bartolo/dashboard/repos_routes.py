@@ -152,6 +152,8 @@ async def websocket_logs(ws: WebSocket, repo: str):
                 pass
         if all_lines:
             await ws.send_json({"type": "init", "lines": all_lines[-50:]})
+        else:
+            await ws.send_json({"type": "init", "lines": []})
     try:
         while True:
             await asyncio.sleep(0.5)
@@ -183,5 +185,6 @@ async def websocket_logs(ws: WebSocket, repo: str):
                     pass
             for line in new_lines:
                 await ws.send_json({"type": "line", "text": line})
+            await ws.send_json({"type": "heartbeat"})
     except (WebSocketDisconnect, Exception):
         pass
