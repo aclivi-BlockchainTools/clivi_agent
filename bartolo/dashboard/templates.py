@@ -1,12 +1,6 @@
 """bartolo/dashboard/templates.py — HTML+CSS+JS inline per Dashboard v2."""
 
-INDEX_HTML = r"""<!doctype html>
-<html lang="ca">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Bartolo Control Center</title>
-<style>
+_CSS = """\
 :root{--bg:#0d1117;--fg:#c9d1d9;--muted:#8b949e;--ok:#3fb950;--bad:#f85149;--card:#161b22;--accent:#58a6ff;--border:#30363d;--warn:#d29922;--input-bg:#010409}
 *{box-sizing:border-box}
 body{background:var(--bg);color:var(--fg);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin:0;padding:0;display:flex;height:100vh;overflow:hidden}
@@ -176,9 +170,9 @@ pre.logs.output{max-height:300px;margin-top:8px}
 .tool-func .func-params{color:var(--muted);font-size:10px;margin-top:2px}
 /* Responsive */
 @media(max-width:700px){body{flex-direction:column}aside{width:100%;min-width:100%;flex-direction:row;overflow-x:auto;padding:4px 8px}aside .logo{display:none}aside a{border-left:0;border-bottom:2px solid transparent;white-space:nowrap}aside a.active{border-bottom-color:var(--accent);border-left:0}main section{padding:12px}}
-</style>
-</head>
-<body>
+"""
+
+_HTML_BODY = """\
 <aside>
   <div class="logo">Bartolo CC</div>
   <a href="#tab-chat" data-tab="chat" class="active">&#x1f4ac; Xat</a>
@@ -334,9 +328,9 @@ pre.logs.output{max-height:300px;margin-top:8px}
 </main>
 <!-- Tool source modal -->
 <div class="modal-bg" id="tool-modal"><div class="modal"><h2 id="tool-modal-title"></h2><textarea class="sys-prompt" id="tool-modal-source" style="max-height:65vh;min-height:300px" spellcheck="false"></textarea><pre id="tool-preview" class="logs" style="max-height:65vh;overflow:auto;display:none"></pre><div style="margin-top:8px;display:flex;gap:8px"><button class="primary" onclick="saveToolSource()">Desar</button><button class="small" onclick="toggleSyntaxPreview()">Preview</button><button onclick="document.getElementById('tool-modal').classList.remove('show')">Tancar</button></div></div></div>
-<div id="toast-container"></div>
+"""
 
-<script>
+_JS = r"""\
 const WS_URL = 'ws://' + location.host + '/ws/chat';
 const CLIENT_ID = 'dash-' + Math.random().toString(36).slice(2,10);
 let ws = null;
@@ -1274,11 +1268,19 @@ document.addEventListener('keydown', function(e) {
     if (_currentThreadId) deleteThread(_currentThreadId);
   }
 });
-
-</script>
-</body>
-</html>
 """
+
+INDEX_HTML = (
+    '<!doctype html>\n<html lang="ca">\n<head>\n<meta charset="utf-8">\n'
+    '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+    '<title>Bartolo Control Center</title>\n<style>\n'
+    + _CSS +
+    '\n</style>\n</head>\n<body>\n'
+    + _HTML_BODY +
+    '\n<div id="toast-container"></div>\n<script>\n'
+    + _JS +
+    '\n</script>\n</body>\n</html>'
+)
 
 
 def render_index() -> str:
