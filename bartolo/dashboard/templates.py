@@ -807,7 +807,7 @@ async function loadSecrets() {
     const data = await r.json();
     renderAiKeys(data.secrets || {}, data.known_key_types || []);
     renderOtherKeys(data.secrets || {});
-  } catch(e) { document.getElementById('ai-keys-list').innerHTML = '<div class="empty">Error</div>'; }
+  } catch(e) { document.getElementById('ai-keys-list').innerHTML = '<div class="empty">Error: '+esc(String(e.message||e))+'</div>'; }
 }
 
 function renderAiKeys(secrets, knownTypes) {
@@ -1294,6 +1294,8 @@ connectWS();
 loadThreads();
 loadInputHistory();
 
+let _loadingCount = 0;
+
 // Init: activate stored tab and load its data
 const activeTab = localStorage.getItem('bartolo-tab') || 'visio';
 switchTab(activeTab);
@@ -1374,7 +1376,6 @@ function renderOverview(status, models, db) {
 }
 
 // ===== GLOBAL LOADING INDICATOR =====
-let _loadingCount = 0;
 function startLoading() { _loadingCount++; updateLoadingBar(); }
 function stopLoading() { _loadingCount = Math.max(0, _loadingCount - 1); updateLoadingBar(); }
 function updateLoadingBar() {
