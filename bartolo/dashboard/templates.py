@@ -732,7 +732,7 @@ function renderRepos(data) {
       const alive = !!s.pid;
       sh += '<div class="svc '+(alive?'run':'stop')+'"><div class="svc-info"><strong>'+(alive?'&#x1f7e2; RUNNING':'&#x1f534; STOPPED')+' &middot; PID '+(s.pid||'?')+'</strong> &middot; step: <code>'+esc(s.step_id||'')+'</code><code>'+esc(s.command||'')+'</code></div>'+
         '<div class="actions"><button class="small" data-view-logs="'+escUrl(repo)+'/'+escUrl(s.step_id||'')+'">Logs</button>'+
-        \'<button class="small" data-live-logs="\'+escUrl(repo)+\'">En directe</button>\'+
+        '<button class="small" data-live-logs="'+escUrl(repo)+'">En directe</button>'+
         '<button class="small primary" data-restart-repo="'+escUrl(repo)+'">Restart</button>'+
         '<button class="small danger" data-stop-repo="'+escUrl(repo)+'">Stop</button></div></div>';
     }
