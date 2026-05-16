@@ -153,6 +153,12 @@ def _analyze_repo_secrets(repo_url: str) -> dict:
             if secrets_for_svc:
                 cloud_services.append(svc_key)
                 cloud_secrets_map[svc_key] = secrets_for_svc
+        # Afegir secrets opcionals específics del servei cloud que no apareixen al codi
+        if svc_key == "supabase":
+            db_pw = "SUPABASE_DB_PASSWORD"
+            if db_pw not in found and db_pw not in cache:
+                if db_pw not in missing:
+                    missing.append(db_pw)
 
     return {
         "missing": missing,
@@ -725,6 +731,7 @@ def _secret_hint(key: str) -> str:
         "SUPABASE_ANON_KEY": "eyJhbG... (JWT anon key)",
         "SUPABASE_SERVICE_ROLE_KEY": "eyJhbG... (JWT service_role key)",
         "SUPABASE_SERVICE_KEY": "eyJhbG... (JWT service key)",
+        "SUPABASE_DB_PASSWORD": "Contrasenya PostgreSQL (Settings → Database)",
         "DATABASE_URL": "postgresql://user:pass@host:5432/db",
         "MONGODB_URI": "mongodb+srv://user:pass@cluster.mongodb.net/...",
         "STRIPE_SECRET_KEY": "sk_live_...",
@@ -755,6 +762,10 @@ def _secret_meta(key: str) -> dict:
         "SUPABASE_SERVICE_KEY": {
             "description": "Clau de servei de Supabase. Alternativa a la service_role key.",
             "required": True,
+        },
+        "SUPABASE_DB_PASSWORD": {
+            "description": "Contrasenya de la base de dades PostgreSQL de Supabase (Settings → Database → Connection string). Necessària per replicar dades al PostgreSQL local.",
+            "required": False,
         },
         "DATABASE_URL": {
             "description": "URL de connexió a la base de dades principal.",
@@ -1054,6 +1065,56 @@ async def _finalize_wizard(ws: WebSocket, thread_id: str, wiz: WizardState) -> N
                     cache[url_env] = cfg.get("url_template", "")
             except Exception as e:
                 container_lines.append(f"⚠️ PostgreSQL: excepció — {e}")
+
+    # Si supabase_migrate=True i tenim la contrasenya de BD, fer pg_dump → local
+    pg_cfg = DB_DOCKER_CONFIGS.get("postgresql", {})
+    if wiz.supabase_migrate:
+        db_password = wiz.collected_secrets.get("SUPABASE_DB_PASSWORD", "")
+        if not db_password:
+            db_password = cache.get("SUPABASE_DB_PASSWORD", "")
+        supabase_url = cache.get("SUPABASE_URL") or wiz.collected_secrets.get("SUPABASE_URL", "")
+        if db_password and supabase_url:
+            import re as _re
+            m = _re.match(r'https?://([a-z0-9]+)\.supabase\.co', supabase_url)
+            if m:
+                project_ref = m.group(1)
+                db_host = f"db.{project_ref}.supabase.co"
+                container_lines.append("🔄 Migrant dades Supabase → PostgreSQL local...")
+                try:
+                    dump_cmd = ["pg_dump", "-h", db_host, "-U", "postgres",
+                                "-d", "postgres", "--no-owner", "--no-acl",
+                                "--clean", "--if-exists"]
+                    restore_cmd = ["docker", "exec", "-i", "agent-postgres",
+                                   "psql", "-U", "agentuser", "-d", "agentdb"]
+                    dump_proc = _sp.Popen(
+                        dump_cmd, stdout=_sp.PIPE, stderr=_sp.PIPE,
+                        env={**__import__("os").environ, "PGPASSWORD": db_password})
+                    _sp.run(restore_cmd, stdin=dump_proc.stdout,
+                            capture_output=True, text=True, timeout=120)
+                    dump_proc.wait(timeout=30)
+                    if dump_proc.returncode == 0:
+                        container_lines.append("✅ Dades migrades correctament de Supabase → PostgreSQL local")
+                        # Update cache to point to local PostgreSQL instead of Supabase cloud
+                        local_pg_url = pg_cfg.get("url_template", "").format(port=pg_cfg.get("port", "5432")) if pg_cfg else ""
+                        if local_pg_url:
+                            cache["DATABASE_URL"] = local_pg_url
+                        cache["SUPABASE_URL"] = "postgresql://agentuser:agentpass@localhost:5432/agentdb"
+                    else:
+                        stderr = dump_proc.stderr.read().decode("utf-8", errors="ignore")[:300]
+                        container_lines.append(f"⚠️ Error al pg_dump (codi {dump_proc.returncode}): {stderr}")
+                except FileNotFoundError:
+                    container_lines.append("⚠️ pg_dump no instal·lat. Instal·la: sudo apt install -y postgresql-client")
+                except _sp.TimeoutExpired:
+                    container_lines.append("⚠️ Timeout migrant dades (2 min). Pot ser que la BD sigui massa gran.")
+                except Exception as e:
+                    container_lines.append(f"⚠️ Error migrant dades: {e}")
+            else:
+                container_lines.append("⚠️ No s'ha pogut extreure el project ref de SUPABASE_URL")
+        else:
+            container_lines.append("💡 Per migrar dades: ves a Supabase → Settings → Database → Connection string")
+            container_lines.append("   i copia la contrasenya. Després executa:")
+            container_lines.append("   pg_dump -h db.REF.supabase.co -U postgres -d postgres \\")
+            container_lines.append("     --no-owner --no-acl | docker exec -i agent-postgres psql -U agentuser -d agentdb")
 
     if container_lines:
         save_secrets_cache(cache)

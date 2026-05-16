@@ -1109,6 +1109,8 @@ function buildWorkspaceForm(form, p) {
       browseBtn.textContent = 'Explora';
     }
   });
+  // Also update input when user types in it directly
+  inp.setAttribute('data-wizard-input', 'workspace');
   // When user selects a folder from browser, update input
   inp.addEventListener('input', function() { /* user typed manually */ });
   const btns = wizEl('div', 'wizard-buttons');
@@ -1119,6 +1121,10 @@ function buildWorkspaceForm(form, p) {
 }
 
 function loadBrowserPath(browser, pathStr) {
+  // Find the associated input field (the one in the same form as this browser)
+  var wizardForm = browser.closest('.wizard-form');
+  var targetInput = wizardForm ? wizardForm.querySelector('.wizard-input') : document.querySelector('.wizard-input');
+  var targetBrowseBtn = wizardForm ? wizardForm.querySelector('.wizard-btn-secondary') : document.querySelector('.wizard-btn-secondary');
   fetch('/api/browse-fs?path=' + encodeURIComponent(pathStr))
     .then(function(r) { return r.json(); })
     .then(function(data) {
@@ -1131,11 +1137,9 @@ function loadBrowserPath(browser, pathStr) {
       selBtn.className = 'wizard-btn-primary';
       selBtn.style.cssText = 'font-size:10px;padding:3px 10px';
       selBtn.addEventListener('click', function() {
-        var inp = document.querySelector('.wizard-input');
-        if (inp) inp.value = data.path;
+        if (targetInput) targetInput.value = data.path;
         browser.style.display = 'none';
-        var browseBtn = document.querySelector('.wizard-btn-secondary');
-        if (browseBtn) browseBtn.textContent = 'Explora';
+        if (targetBrowseBtn) targetBrowseBtn.textContent = 'Explora';
       });
       top.appendChild(selBtn);
       var bc = document.createElement('span');
