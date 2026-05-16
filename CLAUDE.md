@@ -29,7 +29,7 @@ L'usuari final coneix el sistema com **"Bartolo"** (el nom del model d'OpenWebUI
 | `agent_http_bridge.py` | REST API al port 9090, jobs async, shell exec amb token, upload ZIP, wizard, router dispatch | 1408 |
 | `openwebui_tool_repo_agent.py` | Tool per OpenWebUI (v2.4, 10 funcions) | 403 |
 | `openwebui_tool_web_search.py` | Tool DuckDuckGo per cerques | 112 |
-| `bartolo_router.py` | Classificador d'intencions L1 (regex) + L2 (LLM) — 8 intents | 253 |
+| `bartolo_router.py` | Classificador d'intencions L1 (regex) + L2 (LLM) — 8 intents | 257 |
 | `bartolo_init.py` | CLI interactiva per muntar repos sense flags (reutilitza l'agent) | 168 |
 | `bartolo/types.py` | Dataclasses: RepoAnalysis, ServiceInfo, ExecutionPlan, CommandStep... | 80 |
 | `bartolo/validator.py` | Validador de comandes shell (whitelist + blacklist) | 145 |
@@ -50,8 +50,10 @@ L'usuari final coneix el sistema com **"Bartolo"** (el nom del model d'OpenWebUI
 | `agents/debugger.py` | Compatibility shim → bartolo.repair | 16 |
 | `agents/success_kb.py` | Compatibility shim → bartolo.kb | 3 |
 | `dashboard.py` | Entry point :9999 | 54 |
-| `bartolo/dashboard/chat.py` | WebSocket xat + wizard interactiu + router dispatch | 1088 |
-| `bartolo/dashboard/templates.py` | HTML+CSS+JS inline (wizard forms, chat UI, threads) | 1759 |
+| `bartolo/dashboard/chat.py` | WebSocket xat + wizard interactiu + router dispatch | 1427 |
+| `bartolo/dashboard/templates.py` | HTML+CSS+JS inline (wizard forms, chat UI, threads) | 2253 |
+| `bartolo/dashboard/repos_routes.py` | API status/logs/stop/launch/timeline/WS + escàner serveis sistema | 356 |
+| `bartolo/dashboard/chat_routes.py` | API xat, historial, reparacions | 217 |
 | `bench.sh` | Bateria de proves automatitzada (11 repos complets, 6 quick) | 85 |
 | `stress_test.sh` | Bateria d'estrès amb repos complexos (7 repos, detecció) | 110 |
 | `setup_ubuntu.sh` | Instal·lador Node/Docker/Ollama/qwen2.5:14b | 190 |
@@ -554,6 +556,87 @@ de xat (vanilla JS + DOM, sense dependències).
 - `universal_repo_agent_v5.py`: `KNOWN_SECRET_KEYS`, `SELF_CONFIGURED_KEYS`, `NON_SECRET_CONFIG_KEYS`
 
 **Nous tipus WebSocket:** `wizard_step`, `wizard_response`, `wizard_done`, `wizard_error`
+
+### ✅ [RESOLT 2026-05-16] Escàner de serveis del sistema
+
+Nova funció `_scan_system_services()` a `repos_routes.py`:
+- Executa `ss -tlnp` i identifica tots els ports TCP escoltant al sistema
+- Llegeix `/proc/PID/cmdline` per identificar el nom real del procés (dashboard.py, agent_http_bridge, etc.)
+- Mapa de ports coneguts `_KNOWN_PORTS` (MongoDB :27017, MySQL :3306, PostgreSQL :5432, etc.)
+- Retorna llista de dicts: `{port, pid, process, name, address, known, service_type}`
+- S'inclou a `/api/status` com a clau `_system`
+
+**Frontend:**
+- Visio overview: mostra nombre de ports oberts i quants són coneguts
+- Repos tab: nova secció "Sistema" amb tots els serveis detectats (icona verd si conegut, gris si no)
+- CSS: `.sys-svc`, `.sys-svc-header`, `.sys-svc-name`, `.sys-svc-port`, `.sys-svc-pid`
+
+### ✅ [RESOLT 2026-05-16] Fix #14 — Wizard es saltava secrets (doble enviament)
+
+**Causa-arrel exacta:** `submitWizardResponse()` a `templates.py` enviava el missatge
+WebSocket sense deshabilitar els botons. Un doble clic (o doble Enter al camp de secret)
+enviava dos `wizard_response`, avançant dues passes del wizard d'un sol cop. La passa
+intermèdia semblava "saltada". En tornar enrere, `_wizard_back()` treia la clau de
+`collected_secrets` i la mostrava — per això "al tornar enrera sí que surt".
+
+**Fix:** Flag `_wizardProcessing` a `submitWizardResponse()`. En enviar, deshabilita
+tots els botons del wizard i l'input. `renderWizardStep()` reseteja el flag quan
+arriba un nou pas. Segon clic/Enter és ignorat.
+
+### ✅ [RESOLT 2026-05-16] AUTO_GENERATED_KEYS — Claus auto-generables mai al wizard
+
+Nou set `AUTO_GENERATED_KEYS` a `universal_repo_agent_v5.py`:
+`ENCRYPTION_KEY`, `JWT_SECRET`, `SECRET_KEY`, `DJANGO_SECRET_KEY`, `NEXTAUTH_SECRET`
+
+`_analyze_repo_secrets()` les genera automàticament amb `_auto_generate_key()`:
+- `ENCRYPTION_KEY`: `cryptography.fernet.Fernet.generate_key()`
+- `NEXTAUTH_SECRET`: `openssl rand -base64 32` (fallback: `secrets.token_bytes(32)`)
+- Altres: `secrets.token_urlsafe(32)`
+
+Es guarden al cache automàticament i **mai** apareixen al wizard.
+
+### ✅ [RESOLT 2026-05-16] Agent output streaming al xat del dashboard
+
+**Causa-arrel:** `print()` de Python fa buffering quan stdout és un pipe (no TTY).
+El subprocess de l'agent no enviava línies fins que el buffer s'omplia o el procés
+acabava. L'usuari veia "Muntant..." sense progrés.
+
+**Fix:** `_launch_agent()` a `chat.py`:
+- Afegit flag `-u` (unbuffered) a la comanda Python
+- `select.select()` amb timeout 200ms per llegir stdout sense bloquejar
+- Buffer intermedi (`out_buf`) amb flush cada 200ms encara que no arribi `\n`
+- Events `agent_output` enviats via `asyncio.run_coroutine_threadsafe()`
+
+### ✅ [RESOLT 2026-05-16] Container Docker auto-provisioning per Supabase→local
+
+Quan l'usuari tria Supabase→local al wizard, `_finalize_wizard()` ara crea el
+contenidor Docker PostgreSQL automàticament:
+- Comprova si `agent-postgres` existeix (el crea si no)
+- Espera health check (fins a 60s)
+- Actualitza el cache de secrets amb la URL de connexió local
+- Mostra línia al resum: "🗄️ PostgreSQL local creat al port 5432"
+- El contenidor apareix a `/api/status` → `_databases` i a la pestanya Databases
+
+### ✅ [RESOLT 2026-05-16] Telemetria de reparació + historial
+
+- `__REPAIR_EVENT__=<json>`: events estructurats al log de l'agent per cada etapa
+  de reparació (stage, command, error_type, repo_name)
+- `repair_history.jsonl`: historial de reparacions a `~/.universal-agent/repair_history.jsonl`
+- KB de reparació (`repair/kb.py`): entrades ara guarden `repo_name`
+- Nou endpoint `/api/repair-history` al dashboard (chat_routes.py)
+
+### ✅ [RESOLT 2026-05-16] Router reconeix rutes locals
+
+`_URL_RE` a `bartolo_router.py` ampliada per detectar rutes locals:
+`~?/[/\w.\-]+` (ex: `/home/usuari/Projects/wa-desk`, `~/projecte`)
+El prompt L2 distingeix `munta_repo` (URL o ruta local) vs `start_servei` (nom).
+
+### ✅ [RESOLT 2026-05-16] Workspace del wizard per defecte = DEFAULT_WORKSPACE
+
+Abans el wizard usava `~/Projects/agent-workspace` per defecte però el dashboard
+i la pestanya Repos usen `DEFAULT_WORKSPACE` (`~/universal-agent-workspace`).
+Els serveis muntats no apareixien a Repos perquè estaven a un workspace diferent.
+Fix: `str(Path(wiz.workspace or str(DEFAULT_WORKSPACE)).expanduser())`
 
 ## Problemes coneguts pendents
 
