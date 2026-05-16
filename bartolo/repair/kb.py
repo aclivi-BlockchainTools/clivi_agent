@@ -111,7 +111,7 @@ class RepairKB:
         fp = self._fingerprint(stack, error_type, stderr_text)
         return self._load().get(fp)
 
-    def save(self, stack: str, error_type: str, keywords: List[str], fix_command: str, source: str) -> None:
+    def save(self, stack: str, error_type: str, keywords: List[str], fix_command: str, source: str, repo_name: str = "") -> None:
         fp = self._fingerprint(stack, error_type, " ".join(keywords))
         data = self._load()
         entry = data.get(fp, {})
@@ -125,6 +125,7 @@ class RepairKB:
             "success_count": new_count,
             "last_seen": datetime.now().isoformat(timespec="seconds"),
             "source": source if new_count == 1 else entry.get("source", source),
+            "repo_name": repo_name if new_count == 1 else entry.get("repo_name", repo_name),
         }
         self._dump(data)
         self._update_markdown(stack, data)
@@ -143,5 +144,7 @@ class RepairKB:
         for e in entries:
             lines.append(f"## {e['error_type']} / {' + '.join(e.get('keywords', []))}")
             lines.append(f"Fix: `{e['fix_command']}`")
-            lines.append(f"Vist: {e['success_count']} vegades · Font: {e['source']}\n")
+            repo = e.get('repo_name', '')
+            repo_info = f" · Repo: {repo}" if repo else ""
+            lines.append(f"Vist: {e['success_count']} vegades · Font: {e['source']}{repo_info}\n")
         (self._dir / f"repair_kb_{stack}.md").write_text("\n".join(lines), encoding="utf-8")

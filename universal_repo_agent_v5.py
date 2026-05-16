@@ -694,6 +694,15 @@ KNOWN_SECRET_KEYS = {
     "ENCRYPTION_KEY",
 }
 
+# Claus que es poden generar automàticament — no secrets a demanar a l'usuari
+AUTO_GENERATED_KEYS = {
+    "ENCRYPTION_KEY",      # Fernet: cryptography.fernet.Fernet.generate_key()
+    "JWT_SECRET",          # JWT: secrets.token_urlsafe(32)
+    "SECRET_KEY",          # Django/Flask: secrets.token_urlsafe(32)
+    "DJANGO_SECRET_KEY",   # Django: secrets.token_urlsafe(32)
+    "NEXTAUTH_SECRET",     # NextAuth: openssl rand -base64 32
+}
+
 # Claus que l'app gestiona internament (admin panel, Supabase) — no secrets a demanar
 SELF_CONFIGURED_KEYS = {
     "WHATSAPP_ACCESS_TOKEN", "WHATSAPP_VERIFY_TOKEN", "WHATSAPP_PHONE_NUMBER_ID",

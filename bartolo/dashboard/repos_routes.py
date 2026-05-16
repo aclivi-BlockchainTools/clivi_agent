@@ -24,6 +24,130 @@ from bartolo.dashboard.templates import render_logs
 router = APIRouter()
 AGENT_SCRIPT = PROJECT_ROOT / "universal_repo_agent_v5.py"
 
+# Ports coneguts per identificar serveis sense info de procés
+_KNOWN_PORTS = {
+    11434: ("Ollama", "ollama"),
+    9999: ("Bartolo Dashboard", "bartolo"),
+    9090: ("Bartolo Bridge", "bartolo"),
+    3000: ("OpenWebUI / React Dev", "web"),
+    8082: ("Free Claude Code", "ai"),
+    27017: ("MongoDB", "database"),
+    3306: ("MySQL", "database"),
+    3307: ("MySQL (alt)", "database"),
+    5432: ("PostgreSQL", "database"),
+    6379: ("Redis", "database"),
+    631: ("CUPS (impressió)", "system"),
+    22: ("SSH", "system"),
+    53: ("DNS (systemd-resolved)", "system"),
+    4369: ("Erlang Port Mapper", "epmd"),
+}
+
+
+def _scan_system_services() -> list:
+    """Escaneja tots els ports TCP escoltant i identifica serveis coneguts."""
+    import re as _re
+    services = []
+    try:
+        r = subprocess.run(["ss", "-tlnp"], capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return services
+        for line in r.stdout.strip().splitlines()[1:]:
+            line = line.strip()
+            if not line or "LISTEN" not in line:
+                continue
+            # Parse port de la columna d'escolta (format IP:PORT)
+            parts = line.split()
+            listen_col = None
+            for p in parts:
+                if ":" in p and not p.startswith("users:"):
+                    listen_col = p
+                    break
+            if not listen_col:
+                continue
+            addr, port_str = listen_col.rsplit(":", 1)
+            try:
+                port = int(port_str)
+            except ValueError:
+                continue
+            # Extreure procés i PID
+            pid = None
+            process = ""
+            m = _re.search(r'users:\(\("([^"]+)",pid=(\d+)', line)
+            if m:
+                process = m.group(1)
+                pid = int(m.group(2))
+            # Identificar servei
+            name = ""
+            service_type = "unknown"
+            known = False
+            if pid and process in ("python3", "python"):
+                try:
+                    cmdline = Path(f"/proc/{pid}/cmdline").read_text(errors="ignore")
+                    cmdline = cmdline.replace("\x00", " ")
+                    if "dashboard.py" in cmdline:
+                        name = "Bartolo Dashboard"
+                        service_type = "bartolo"
+                        known = True
+                    elif "agent_http_bridge" in cmdline:
+                        name = "Bartolo Bridge"
+                        service_type = "bartolo"
+                        known = True
+                    elif "uvicorn" in cmdline:
+                        name = "Uvicorn"
+                        service_type = "python"
+                        known = True
+                    elif "streamlit" in cmdline:
+                        name = "Streamlit"
+                        service_type = "python"
+                        known = True
+                    elif "free-claude-code" in cmdline:
+                        name = "Free Claude Code"
+                        service_type = "ai"
+                        known = True
+                    else:
+                        name = process
+                except Exception:
+                    name = process
+            elif "ollama" in process.lower():
+                name = "Ollama"
+                service_type = "ollama"
+                known = True
+            elif "node" in process:
+                name = "Node.js"
+                service_type = "node"
+                known = True
+            elif "docker-proxy" in process or "dockerd" in process:
+                name = "Docker"
+                service_type = "docker"
+                known = True
+            elif "php" in process:
+                name = "PHP Built-in Server"
+                service_type = "php"
+                known = True
+            elif "sshd" in process:
+                name = "SSH Server"
+                service_type = "system"
+                known = True
+            if not name:
+                info = _KNOWN_PORTS.get(port)
+                if info:
+                    name, service_type = info
+                    known = True
+                else:
+                    name = process or f"Servei desconegut"
+            services.append({
+                "port": port,
+                "pid": pid,
+                "process": process,
+                "name": name,
+                "address": addr,
+                "known": known,
+                "service_type": service_type,
+            })
+    except Exception:
+        pass
+    return services
+
 
 def _launch_async(input_value: str, dockerize: bool, approve_all: bool, no_refine: bool) -> None:
     cmd = [sys.executable, str(AGENT_SCRIPT), "--input", input_value, "--execute",
@@ -46,7 +170,37 @@ def _launch_async(input_value: str, dockerize: bool, approve_all: bool, no_refin
 
 @router.get("/api/status")
 async def api_status():
-    return load_services_registry(DEFAULT_WORKSPACE)
+    data = load_services_registry(DEFAULT_WORKSPACE)
+    # Scan Docker containers for databases
+    try:
+        import subprocess as _sp
+        r = _sp.run(
+            ["docker", "ps", "--format", "{{.Names}} {{.Ports}}", "--filter", "name=agent-"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            from bartolo.provisioner import DB_DOCKER_CONFIGS
+            databases = []
+            for line in r.stdout.strip().splitlines():
+                parts = line.strip().split(maxsplit=1)
+                if not parts:
+                    continue
+                container = parts[0]
+                for db_type, cfg in DB_DOCKER_CONFIGS.items():
+                    if cfg.get("container") == container:
+                        port = cfg["port"]
+                        databases.append({
+                            "type": db_type,
+                            "container": container,
+                            "port": port,
+                            "connection_url": cfg.get("url_template", ""),
+                        })
+            if databases:
+                data["_databases"] = databases
+    except Exception:
+        pass
+    data["_system"] = _scan_system_services()
+    return data
 
 
 @router.get("/api/logs")

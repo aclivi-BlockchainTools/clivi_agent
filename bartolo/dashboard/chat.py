@@ -57,13 +57,34 @@ class WizardState:
 _wizard_states: Dict[str, WizardState] = {}
 
 
+def _auto_generate_key(var: str) -> str:
+    """Genera una clau automàtica segons el tipus de variable."""
+    if var == "ENCRYPTION_KEY":
+        from cryptography.fernet import Fernet
+        return Fernet.generate_key().decode()
+    elif var == "NEXTAUTH_SECRET":
+        import subprocess
+        try:
+            result = subprocess.run(["openssl", "rand", "-base64", "32"],
+                                    capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except Exception:
+            pass
+        import secrets, base64
+        return base64.b64encode(secrets.token_bytes(32)).decode()
+    else:
+        import secrets
+        return secrets.token_urlsafe(32)
+
+
 def _analyze_repo_secrets(repo_url: str) -> dict:
     """Clona el repo, detecta vars d'entorn i serveis cloud, comprova la caché.
     Retorna dict amb missing, found, repo_path, cloud_services, cloud_secrets_map."""
     from universal_repo_agent_v5 import (
         acquire_input, detect_env_vars_from_code,
         load_secrets_cache, KNOWN_SECRET_KEYS, ensure_workspace,
-        detect_third_party_services,
+        detect_third_party_services, AUTO_GENERATED_KEYS, SELF_CONFIGURED_KEYS,
     )
     from bartolo.provisioner import CLOUD_TO_LOCAL
 
@@ -100,18 +121,25 @@ def _analyze_repo_secrets(repo_url: str) -> dict:
 
     missing = []
     found = []
+    generated_any = False
     for var in sorted(detected):
+        if var in SELF_CONFIGURED_KEYS:
+            continue  # mai demanar — l'app ho gestiona internament
         if var in KNOWN_SECRET_KEYS:
             if var in cache and cache[var]:
                 found.append(var)
             elif var in existing_env and existing_env[var]:
                 found.append(var)
-                # Also save to cache for future mounts
                 cache[var] = existing_env[var]
+            elif var in AUTO_GENERATED_KEYS:
+                generated = _auto_generate_key(var)
+                cache[var] = generated
+                found.append(var)
+                generated_any = True
             else:
                 missing.append(var)
 
-    if existing_env:
+    if existing_env or generated_any:
         from universal_repo_agent_v5 import save_secrets_cache
         save_secrets_cache(cache)
 
@@ -412,8 +440,8 @@ async def _send_follow_up(ws: WebSocket, thread_id: str, text: str) -> None:
 
 async def _launch_agent(ws: WebSocket, thread_id: str, repo_url: str,
                           workspace: str = None) -> None:
-    """Llença l'agent universal en background i notifica al xat amb URLs i BD."""
-    import subprocess, threading, asyncio as _asyncio
+    """Llença l'agent universal en background i fa streaming del progrés al xat."""
+    import subprocess, threading, asyncio as _asyncio, json as _json, time as _time
     agent = PROJECT_ROOT / "universal_repo_agent_v5.py"
     ws_dir = Path(str(workspace or DEFAULT_WORKSPACE)).expanduser().resolve()
     log_dir = ws_dir / LOG_DIRNAME
@@ -423,14 +451,58 @@ async def _launch_agent(ws: WebSocket, thread_id: str, repo_url: str,
     loop = _asyncio.get_running_loop()
     def _launch():
         try:
+            cmd = [sys.executable, "-u", str(agent), "--input", repo_url, "--execute",
+                   "--approve-all", "--non-interactive", "--no-readme", "--no-model-refine",
+                   "--workspace", str(ws_dir)]
             with launch_log.open("w") as f:
-                cmd = [sys.executable, str(agent), "--input", repo_url, "--execute",
-                       "--approve-all", "--non-interactive", "--no-readme", "--no-model-refine",
-                       "--workspace", str(ws_dir)]
                 f.write(f"CMD: {' '.join(cmd)}\n\n")
                 f.flush()
-                subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT,
-                               text=True, timeout=600, cwd=str(PROJECT_ROOT))
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True,
+                                    bufsize=1, cwd=str(PROJECT_ROOT))
+            import select as _sel
+            out_buf: list = []
+            last_flush = _time.monotonic()
+            def _flush_buffer():
+                nonlocal last_flush
+                if out_buf:
+                    lines = "\n".join(out_buf)
+                    _asyncio.run_coroutine_threadsafe(
+                        ws.send_json({"type": "agent_output", "lines": lines}), loop
+                    )
+                    out_buf.clear()
+                last_flush = _time.monotonic()
+            fd = proc.stdout.fileno()
+            while proc.poll() is None:
+                ready, _, _ = _sel.select([proc.stdout], [], [], 0.2)
+                if ready:
+                    line = proc.stdout.readline()
+                    if not line:
+                        break
+                    with launch_log.open("a") as f:
+                        f.write(line)
+                        f.flush()
+                    stripped = line.rstrip('\n\r')
+                    if stripped.startswith('__REPAIR_EVENT__='):
+                        _flush_buffer()
+                        try:
+                            payload = _json.loads(stripped.split('=', 1)[1])
+                            _asyncio.run_coroutine_threadsafe(
+                                ws.send_json({"type": "repair_event", **payload}), loop
+                            )
+                        except Exception:
+                            out_buf.append(stripped)
+                    else:
+                        out_buf.append(stripped)
+                # Flush cada ~200ms encara que no arribin noves línies
+                if out_buf and _time.monotonic() - last_flush >= 0.2:
+                    _flush_buffer()
+            # Drain remaining output after process exits
+            for line in proc.stdout:
+                stripped = line.rstrip('\n\r')
+                out_buf.append(stripped)
+            _flush_buffer()
+            proc.wait()
             info = _build_access_message(repo_url, launch_log, workspace=str(ws_dir))
             if info:
                 _asyncio.run_coroutine_threadsafe(
@@ -449,7 +521,7 @@ async def _launch_agent(ws: WebSocket, thread_id: str, repo_url: str,
                 f.write(f"\n[ERROR] {e}\n")
     threading.Thread(target=_launch, daemon=True).start()
     from bartolo.dashboard.chat_routes import persist_thread_message
-    text = f"Muntatge de {repo_url} iniciat. T'aviso quan estigui llest amb les URLs d'accés."
+    text = f"Muntant {repo_url} — el progrés apareixerà aquí sota:"
     persist_thread_message(thread_id, "assistant", text)
     await ws.send_json({"type": "done", "full_text": text})
 
@@ -593,7 +665,7 @@ def _build_wizard_step(step_name: str, wiz: WizardState) -> dict:
     payload = {}
     if step_name == "workspace":
         payload = {
-            "default_value": str(Path(wiz.workspace or "~/Projects/agent-workspace").expanduser()),
+            "default_value": str(Path(wiz.workspace or str(DEFAULT_WORKSPACE)).expanduser()),
             "repo_url": wiz.repo_url,
         }
     elif step_name == "secret":
@@ -894,6 +966,96 @@ async def _finalize_wizard(ws: WebSocket, thread_id: str, wiz: WizardState) -> N
         cache.update(placeholders)
     save_secrets_cache(cache)
 
+    # --- Provisionar contenidors Docker per serveis cloud en mode "local" ---
+    from bartolo.provisioner import DB_DOCKER_CONFIGS, CLOUD_TO_LOCAL as _C2L
+    import subprocess as _sp, time as _t
+
+    container_lines: List[str] = []
+    for svc, choice in wiz.cloud_choices.items():
+        if choice != "local":
+            continue
+        local_db = _C2L.get(svc)
+        if not local_db:
+            continue
+        cfg = DB_DOCKER_CONFIGS.get(local_db)
+        if not cfg:
+            continue
+        container = cfg["container"]
+        port = cfg["port"]
+        image = cfg["image"]
+        env_args = " ".join(f"-e {k}={v}" for k, v in cfg.get("env_vars", {}).items())
+        created = False
+        try:
+            inspect = _sp.run(["docker", "inspect", container],
+                            capture_output=True, text=True, timeout=5)
+            if inspect.returncode == 0:
+                start = _sp.run(["docker", "start", container],
+                              capture_output=True, text=True, timeout=15)
+                if start.returncode == 0:
+                    container_lines.append(f"🗄️ {local_db.upper()} ({container}): arrencat")
+                else:
+                    container_lines.append(f"⚠️ {local_db.upper()} ({container}): error arrencant")
+                created = True
+        except Exception:
+            pass
+        if not created:
+            cmd = f"docker run -d --name {container} {env_args} -p {port}:{port} {image}"
+            try:
+                run_result = _sp.run(cmd.split(), capture_output=True, text=True, timeout=60)
+                if run_result.returncode == 0:
+                    # Esperar health check
+                    for _ in range(30):
+                        health = _sp.run(
+                            ["docker", "inspect", "-f", "{{.State.Status}}", container],
+                            capture_output=True, text=True, timeout=5)
+                        if health.stdout.strip() == "running":
+                            break
+                        _t.sleep(2)
+                    container_lines.append(f"🗄️ {local_db.upper()} ({container}): creat al port {port}")
+                    # Actualitzar cache amb URL de connexió local
+                    url_env = cfg.get("url_env")
+                    if url_env and url_env not in cache:
+                        cache[url_env] = cfg.get("url_template", "")
+                    if container == "agent-postgres":
+                        cache["SUPABASE_URL"] = "http://localhost:54321"
+                else:
+                    container_lines.append(f"⚠️ {local_db.upper()}: error — {run_result.stderr[:100]}")
+            except Exception as e:
+                container_lines.append(f"⚠️ {local_db.upper()}: excepció — {e}")
+
+    # Si supabase_migrate=True però cloud choice no era "local", creem PostgreSQL igualment
+    if wiz.supabase_migrate and "supabase" not in [c for c, v in wiz.cloud_choices.items() if v == "local"]:
+        cfg = DB_DOCKER_CONFIGS.get("postgresql")
+        if cfg:
+            container = cfg["container"]
+            port = cfg["port"]
+            image = cfg["image"]
+            env_args = " ".join(f"-e {k}={v}" for k, v in cfg.get("env_vars", {}).items())
+            try:
+                inspect = _sp.run(["docker", "inspect", container],
+                                capture_output=True, text=True, timeout=5)
+                if inspect.returncode != 0:
+                    cmd = f"docker run -d --name {container} {env_args} -p {port}:{port} {image}"
+                    _sp.run(cmd.split(), capture_output=True, text=True, timeout=60)
+                    for _ in range(30):
+                        health = _sp.run(
+                            ["docker", "inspect", "-f", "{{.State.Status}}", container],
+                            capture_output=True, text=True, timeout=5)
+                        if health.stdout.strip() == "running":
+                            break
+                        _t.sleep(2)
+                else:
+                    _sp.run(["docker", "start", container], capture_output=True, text=True, timeout=15)
+                container_lines.append(f"🗄️ PostgreSQL (agent-postgres): creat per migració Supabase → local")
+                url_env = cfg.get("url_env")
+                if url_env and url_env not in cache:
+                    cache[url_env] = cfg.get("url_template", "")
+            except Exception as e:
+                container_lines.append(f"⚠️ PostgreSQL: excepció — {e}")
+
+    if container_lines:
+        save_secrets_cache(cache)
+
     # Clear wizard state
     _wizard_states.pop(thread_id, None)
 
@@ -910,6 +1072,9 @@ async def _finalize_wizard(ws: WebSocket, thread_id: str, wiz: WizardState) -> N
             lines.append(f"{icon} {svc}: {'BD local Docker' if choice == 'local' else 'Cloud'}")
     if wiz.supabase_migrate:
         lines.append(f"🔄 Migració Supabase → PostgreSQL local: Sí")
+    if container_lines:
+        for cl in container_lines:
+            lines.append(cl)
     persist_thread_message(thread_id, "assistant", "\n".join(lines))
     await ws.send_json({"type": "wizard_done", "message": "\n".join(lines)})
 
@@ -1233,7 +1398,14 @@ def _extract_cmd(text: str) -> str:
 
 
 def _extract_url(text: str) -> str:
-    import re
+    import re, os
+    # Local absolute paths: /home/... or ~/... (expand ~)
+    m = re.search(r'(~?/[/\w.\-]+(?:/[/\w.\-]+)*)', text)
+    if m:
+        candidate = os.path.expanduser(m.group(1))
+        if os.path.isdir(candidate):
+            return candidate
+    # Git URLs
     m = re.search(r'(https?://[^\s]+|github\.com/[^\s]+|gitlab\.com/[^\s]+|bitbucket\.org/[^\s]+)', text)
     if m:
         url = m.group(1)

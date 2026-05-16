@@ -134,8 +134,8 @@ Respon ÚNICAMENT amb un JSON en una sola línia. Cap text extra.
 Categories:
 - temps_data: preguntes sobre hora, data, dia de la setmana
 - info_sistema: estat del sistema, docker, processos, ports, versions, logs, espai disc
-- munta_repo: muntar, clonar, instal·lar, desplegar un repositori GitHub/GitLab NOU (requereix URL)
-- start_servei: arrencar, arrancar, reiniciar, engegar un servei/repo JA EXISTENT pel nom (sense URL)
+- munta_repo: muntar, clonar, instal·lar, desplegar un repositori NOU (URL GitHub/GitLab/Bitbucket o ruta local com /home/...)
+- start_servei: arrencar, arrancar, reiniciar, engegar un servei/repo JA EXISTENT pel nom (sense URL ni ruta)
 - atura_repo: aturar, parar, apagar, matar un servei/repo pel nom
 - gestio_docker: actualitzar o gestionar containers Docker existents
 - cerca_web: cerques a internet, informació externa
@@ -215,7 +215,7 @@ def classify_l2(text: str,
 # Punt d'entrada: classifica text amb L1 → L2
 # ---------------------------------------------------------------------------
 
-_URL_RE = re.compile(r'https?://\S+|(?:github|gitlab|bitbucket)\.com/\S+', re.I)
+_URL_RE = re.compile(r'https?://\S+|(?:github|gitlab|bitbucket)\.com/\S+|~?/[/\w.\-]+', re.I)
 _REPO_NAME_RE = re.compile(
     r'\b(?:arrenca|arrancar|arrencar|reinicia|reiniciar|engega|restart|start|'
     r'atura|aturar|para|parar|stop|apaga|apagar|mata|matar|frena|deten|detener)\s+'

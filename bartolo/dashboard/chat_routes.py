@@ -159,6 +159,24 @@ async def get_history():
     return {"history": _load_history()}
 
 
+@router.get("/api/repair-history")
+async def get_repair_history(limit: int = 50):
+    """Retorna l'historial de reparacions (JSONL) ordenat per data."""
+    history_path = Path.home() / ".universal-agent" / "repair_history.jsonl"
+    if not history_path.exists():
+        return {"entries": []}
+    entries = []
+    try:
+        with history_path.open() as f:
+            for line in f:
+                if line.strip():
+                    entries.append(json.loads(line))
+    except Exception:
+        return {"entries": []}
+    entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
+    return {"entries": entries[:limit]}
+
+
 # Public API for chat.py WS to use:
 def append_input_to_history(text: str):
     """Record an input to the global input history."""

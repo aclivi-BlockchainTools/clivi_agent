@@ -6,6 +6,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -63,6 +64,37 @@ def _warn(msg: str) -> None:
 
 def _info(msg: str) -> None:
     print(f"[INFO] {msg}")
+
+
+def _event(event_type: str, **kwargs) -> None:
+    """Emet un event estructurat de reparació com a línia JSON.
+    El dashboard i el bridge parsegen aquests markers per mostrar
+    el progrés de reparació en temps real."""
+    payload = json.dumps({"type": event_type, **kwargs}, ensure_ascii=False, default=str)
+    print(f"__REPAIR_EVENT__={payload}")
+
+
+def _log_repair_history(stack: str, error_type: str, step_command: str,
+                        source: str, fix_command: str, repo_name: str,
+                        success: bool = True) -> None:
+    """Afegeix una entrada a l'historial de reparacions (JSONL)."""
+    try:
+        history_path = Path.home() / ".universal-agent" / "repair_history.jsonl"
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "repo_name": repo_name,
+            "stack": stack,
+            "error_type": error_type,
+            "step_command": step_command,
+            "source": source,
+            "fix_command": fix_command,
+            "success": success,
+        }
+        with history_path.open("a") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # no trencar el pipeline per un error d'escriptura
 
 
 def _extract_bash_command(raw: str) -> Optional[str]:
@@ -371,6 +403,7 @@ class IntelligentDebugger:
     def repair(self, step: Any, initial_result: Any, approve_all: bool = True) -> RepairResult:
         """Orquestra: Plan B → KB → Ollama → DeepSeek → Anthropic → Escalate."""
         stack = self._stack()
+        repo_name = getattr(self.analysis, "repo_name", "") or ""
         kb_md = self.kb.markdown_for_stack(stack)
         all_results: List[Any] = [initial_result]
         all_attempts: List[Dict[str, Any]] = []
@@ -379,6 +412,7 @@ class IntelligentDebugger:
         fallbacks = _get_fallbacks(step, initial_result)
         for fb_cmd in fallbacks:
             _info(f"Plan B: provant '{fb_cmd}'...")
+            _event("repair_stage", stage="fallback", command=fb_cmd, repo_name=repo_name)
             fb_result, fb_success = self._run_repair_cmd(fb_cmd, step, 0)
             all_results.append(fb_result)
             all_attempts.append({"attempt": 0, "command": fb_cmd,
@@ -396,6 +430,8 @@ class IntelligentDebugger:
         if kb_entry:
             kb_cmd = kb_entry["fix_command"]
             _info(f"KB hit: {kb_cmd}")
+            _event("repair_stage", stage="kb", command=kb_cmd,
+                   error_type=kb_entry.get("error_type", ""), repo_name=repo_name)
             kb_result, kb_success = self._run_repair_cmd(kb_cmd, step, 0)
             all_results.append(kb_result)
             all_attempts.append({"attempt": 0, "command": kb_cmd,
@@ -403,7 +439,10 @@ class IntelligentDebugger:
                                   "stderr_tail": _tail(kb_result.stderr, 5),
                                   "result": kb_result, "success": kb_success})
             if kb_success:
-                self.kb.save(stack, kb_entry.get("error_type", "kb_hit"), kb_entry.get("keywords", []), kb_cmd, "kb")
+                self.kb.save(stack, kb_entry.get("error_type", "kb_hit"), kb_entry.get("keywords", []), kb_cmd, "kb", repo_name=repo_name)
+                _log_repair_history(stack, kb_entry.get("error_type", "kb_hit"), step.command, "kb", kb_cmd, repo_name)
+                _event("repair_success", source="kb", fix_command=kb_cmd,
+                       error_type=kb_entry.get("error_type", ""), repo_name=repo_name)
                 return RepairResult(repaired=True, source="kb", fix_command=kb_cmd,
                                     diagnosis=None, execution_results=all_results,
                                     repair_attempts=all_attempts)
@@ -411,8 +450,12 @@ class IntelligentDebugger:
         # 3. Diagnose with repo context
         diagnosis = self._diagnose(step, initial_result)
         _info(f"Diagnosi: [{diagnosis.error_type}] {diagnosis.description}")
+        _event("repair_diagnosis", error_type=diagnosis.error_type,
+               description=diagnosis.description, repo_name=repo_name)
 
         # 4. Ollama multi-turn loop
+        _event("repair_stage", stage="ollama", attempts=self.max_repair_attempts,
+               error_type=diagnosis.error_type, repo_name=repo_name)
         ollama_attempts = self._repair_loop_ollama(step, initial_result, stack, kb_md)
         all_attempts.extend(ollama_attempts)
         all_results.extend(a["result"] for a in ollama_attempts if a.get("result") is not None)
@@ -420,12 +463,18 @@ class IntelligentDebugger:
         successful = next((a for a in ollama_attempts if a.get("success")), None)
         if successful:
             self.kb.save(stack, diagnosis.error_type, diagnosis.keywords,
-                         successful["command"], "ollama")
+                         successful["command"], "ollama", repo_name=repo_name)
+            _log_repair_history(stack, diagnosis.error_type, step.command, "ollama", successful["command"], repo_name)
+            _event("repair_success", source="ollama", fix_command=successful["command"],
+                   error_type=diagnosis.error_type, repo_name=repo_name)
             return RepairResult(repaired=True, source="ollama", fix_command=successful["command"],
                                 diagnosis=diagnosis, execution_results=all_results,
                                 repair_attempts=all_attempts)
 
         # 5. DeepSeek API (cheap cloud AI)
+        _event("repair_stage", stage="deepseek",
+               reason="Ollama no ha pogut reparar l'error",
+               error_type=diagnosis.error_type, repo_name=repo_name)
         repo_context = {
             "root": str(getattr(self.analysis, "root", "")),
             "manifests": getattr(self.analysis, "top_level_manifests", []),
@@ -439,6 +488,8 @@ class IntelligentDebugger:
         )
         if deepseek_cmd:
             _info(f"DeepSeek suggereix: {deepseek_cmd}")
+            _event("repair_suggestion", stage="deepseek", command=deepseek_cmd,
+                   error_type=diagnosis.error_type, repo_name=repo_name)
             ds_result, ds_success = self._run_repair_cmd(deepseek_cmd, step, len(all_attempts) + 1)
             all_results.append(ds_result)
             all_attempts.append({"attempt": len(all_attempts) + 1, "command": deepseek_cmd,
@@ -447,12 +498,18 @@ class IntelligentDebugger:
                                   "result": ds_result, "success": ds_success})
             if ds_success:
                 self.kb.save(stack, diagnosis.error_type, diagnosis.keywords,
-                             deepseek_cmd, "deepseek")
+                             deepseek_cmd, "deepseek", repo_name=repo_name)
+                _log_repair_history(stack, diagnosis.error_type, step.command, "deepseek", deepseek_cmd, repo_name)
+                _event("repair_success", source="deepseek", fix_command=deepseek_cmd,
+                       error_type=diagnosis.error_type, repo_name=repo_name)
                 return RepairResult(repaired=True, source="deepseek", fix_command=deepseek_cmd,
                                     diagnosis=diagnosis, execution_results=all_results,
                                     repair_attempts=all_attempts)
 
         # 6. Anthropic API fallback (últim recurs)
+        _event("repair_stage", stage="anthropic",
+               reason="DeepSeek no ha pogut reparar l'error",
+               error_type=diagnosis.error_type, repo_name=repo_name)
         anthropic_cmd = repair_with_anthropic(
             step=step,
             prior_attempts=ollama_attempts,
@@ -470,12 +527,17 @@ class IntelligentDebugger:
                                   "result": ant_result, "success": ant_success})
             if ant_success:
                 self.kb.save(stack, diagnosis.error_type, diagnosis.keywords,
-                             anthropic_cmd, "anthropic")
+                             anthropic_cmd, "anthropic", repo_name=repo_name)
+                _log_repair_history(stack, diagnosis.error_type, step.command, "anthropic", anthropic_cmd, repo_name)
+                _event("repair_success", source="anthropic", fix_command=anthropic_cmd,
+                       error_type=diagnosis.error_type, repo_name=repo_name)
                 return RepairResult(repaired=True, source="anthropic", fix_command=anthropic_cmd,
                                     diagnosis=diagnosis, execution_results=all_results,
                                     repair_attempts=all_attempts)
 
         # 7. All failed — escalate via ErrorReporter
+        _event("repair_failed", attempts=len(all_attempts),
+               error_type=diagnosis.error_type, repo_name=repo_name)
         self._escalate(step, diagnosis, all_attempts, initial_result)
 
         return RepairResult(repaired=False, source="none", fix_command=None,
