@@ -18,7 +18,7 @@ _CSS = """\
 ::-webkit-scrollbar-corner{background:var(--bg)}
 
 body{
-  background:var(--bg);color:var(--fg);font-family:var(--font-body);font-size:12px;
+  background:var(--bg);color:var(--fg);font-family:var(--font-body);font-size:13px;
   margin:0;padding:0;display:flex;flex-direction:column;height:100vh;overflow:hidden;
   font-feature-settings:'calt' 1,'liga' 1;
 }
@@ -207,6 +207,7 @@ tr:nth-child(even){background:rgba(255,255,255,.008)}
 .sys-svc-port{flex-shrink:0;width:70px;text-align:right;font-family:var(--font-body);font-size:10px;color:var(--accent)}
 .sys-svc-port a{color:var(--accent)}
 .sys-svc-pid{flex-shrink:0;width:60px;text-align:right;font-size:9px;color:var(--muted)}
+.browse-entry:hover{background:var(--border)}
 
 /* ===== BUTTONS ===== */
 button{
@@ -376,12 +377,12 @@ pre.logs.output{max-height:300px;margin-top:10px}
 .repair-badge.ollama{background:rgba(166,226,46,.1);color:var(--accent)}
 .repair-badge.deepseek{background:rgba(230,197,71,.1);color:var(--warn)}
 .repair-badge.anthropic{background:rgba(230,197,71,.08);color:var(--warn)}
-.agent-line{display:block;font-size:9px;color:var(--muted);padding:1px 0;line-height:1.4}
-.agent-line.step{font-size:10px;color:var(--fg);font-weight:600;padding:4px 0 2px}
+.agent-line{display:block;font-size:11px;color:var(--muted);padding:1px 0;line-height:1.5}
+.agent-line.step{font-size:12px;color:var(--fg);font-weight:600;padding:5px 0 3px}
 .agent-line.info{color:var(--accent)}
 .agent-line.warn{color:var(--warn)}
-.agent-block{max-height:500px;overflow-y:auto;background:var(--input-bg);border:1px solid var(--border-light);border-radius:2px;padding:8px 12px;margin:4px 0}
-.agent-block::before{content:'PROGRES';display:block;font-size:8px;color:var(--accent);letter-spacing:.8px;margin-bottom:6px;padding-bottom:6px;border-bottom:1px solid var(--border);font-weight:600}
+.agent-block{max-height:600px;overflow-y:auto;background:var(--input-bg);border:1px solid var(--border-light);border-radius:2px;padding:10px 14px;margin:6px 0;min-height:80px}
+.agent-block::before{content:'PROGRÉS';display:block;font-size:9px;color:var(--accent);letter-spacing:.8px;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border);font-weight:600}
 .repair-table-wrap{overflow-x:auto}
 .repair-cmd{
   font-family:var(--font-body);font-size:8px;background:var(--input-bg);padding:3px 8px;
@@ -941,7 +942,15 @@ function handleAgentOutput(lines) {
     if (/^--- Step \d+\/\d+/.test(line)) span.className += ' step';
     else if (/^\[INFO\]/.test(line)) span.className += ' info';
     else if (/^\[WARN\]/.test(line)) span.className += ' warn';
-    span.textContent = line;
+    else if (/^=== RESUM/.test(line)) span.className += ' step';
+    // Fer URLs clicables
+    var urlMatch = line.match(/https?:\/\/\S+/);
+    if (urlMatch) {
+      var url = urlMatch[0].replace(/[.,;]$/, '');
+      span.innerHTML = esc(line).replace(esc(url), '<a href="'+esc(url)+'" target="_blank" rel="noopener" style="color:var(--accent)">'+esc(url)+'</a>');
+    } else {
+      span.textContent = line;
+    }
     _agentBlockEl.appendChild(span);
   });
   // Trim old lines to keep block manageable
@@ -1077,12 +1086,103 @@ function buildWorkspaceForm(form, p) {
   form.innerHTML += '<div class="wizard-step-title">Carpeta de muntatge</div>';
   form.innerHTML += '<div class="wizard-label">On vols muntar <code style="background:var(--input-bg);padding:2px 6px;border-radius:3px">' + esc(p.repo_url || '') + '</code>?</div>';
   const inp = wizInput('text', '', p.default_value || '', 'wizard-input');
-  form.appendChild(inp);
+  // Row: input + browse button
+  const row = wizEl('div', '');
+  row.style.cssText = 'display:flex;gap:8px;align-items:center';
+  row.appendChild(inp);
+  const browseBtn = wizButton('Explora', 'wizard-btn-secondary');
+  browseBtn.style.cssText = 'white-space:nowrap;flex-shrink:0';
+  row.appendChild(browseBtn);
+  form.appendChild(row);
+  // File browser panel
+  const browser = wizEl('div', '');
+  browser.style.cssText = 'display:none;margin-top:10px;border:1px solid var(--border-light);border-radius:6px;padding:8px;max-height:280px;overflow-y:auto;background:var(--input-bg)';
+  form.appendChild(browser);
+  // Browse button handler
+  browseBtn.addEventListener('click', function() {
+    if (browser.style.display === 'none') {
+      browser.style.display = 'block';
+      browseBtn.textContent = 'Amaga';
+      loadBrowserPath(browser, inp.value || '~');
+    } else {
+      browser.style.display = 'none';
+      browseBtn.textContent = 'Explora';
+    }
+  });
+  // When user selects a folder from browser, update input
+  inp.addEventListener('input', function() { /* user typed manually */ });
   const btns = wizEl('div', 'wizard-buttons');
   btns.appendChild(wizButton('Continua', 'wizard-btn-primary', function() {
     submitWizardResponse('workspace', {workspace: inp.value});
   }));
   form.appendChild(btns);
+}
+
+function loadBrowserPath(browser, pathStr) {
+  fetch('/api/browse-fs?path=' + encodeURIComponent(pathStr))
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      browser.innerHTML = '';
+      // Breadcrumb + select button
+      var top = document.createElement('div');
+      top.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:8px;font-size:11px';
+      var selBtn = document.createElement('button');
+      selBtn.textContent = 'Selecciona';
+      selBtn.className = 'wizard-btn-primary';
+      selBtn.style.cssText = 'font-size:10px;padding:3px 10px';
+      selBtn.addEventListener('click', function() {
+        var inp = document.querySelector('.wizard-input');
+        if (inp) inp.value = data.path;
+        browser.style.display = 'none';
+        var browseBtn = document.querySelector('.wizard-btn-secondary');
+        if (browseBtn) browseBtn.textContent = 'Explora';
+      });
+      top.appendChild(selBtn);
+      var bc = document.createElement('span');
+      bc.style.cssText = 'color:var(--muted);word-break:break-all';
+      bc.textContent = data.path;
+      top.appendChild(bc);
+      browser.appendChild(top);
+      // Parent dir
+      if (data.parent) {
+        var parentRow = document.createElement('div');
+        parentRow.className = 'browse-entry';
+        parentRow.style.cssText = 'padding:6px 8px;cursor:pointer;border-radius:4px;display:flex;gap:6px;align-items:center;font-size:11px';
+        parentRow.innerHTML = '&#x1f4c1; ..';
+        parentRow.addEventListener('click', function() { loadBrowserPath(browser, data.parent); });
+        browser.appendChild(parentRow);
+      }
+      // Entries
+      if (!data.entries || data.entries.length === 0) {
+        var empty = document.createElement('div');
+        empty.style.cssText = 'color:var(--muted);font-size:11px;padding:8px';
+        empty.textContent = '(directori buit)';
+        browser.appendChild(empty);
+      } else {
+        data.entries.forEach(function(e) {
+          var erow = document.createElement('div');
+          erow.style.cssText = 'padding:6px 8px;cursor:pointer;border-radius:4px;display:flex;gap:6px;align-items:center;font-size:11px';
+          erow.className = 'browse-entry';
+          if (e.is_dir) {
+            erow.innerHTML = '<span style="color:var(--accent2)">&#x1f4c1;</span> <span>' + esc(e.name) + '</span>';
+          }
+          if (e.is_dir) {
+            erow.addEventListener('click', function() { loadBrowserPath(browser, e.path); });
+            browser.appendChild(erow);
+          }
+        });
+      }
+      // Error
+      if (data.error) {
+        var err = document.createElement('div');
+        err.style.cssText = 'color:var(--bad);font-size:11px;padding:4px 8px';
+        err.textContent = data.error;
+        browser.appendChild(err);
+      }
+    })
+    .catch(function(err) {
+      browser.innerHTML = '<div style="color:var(--bad);font-size:11px;padding:4px 8px">Error de connexió</div>';
+    });
 }
 
 function buildSecretForm(form, p) {
@@ -1418,6 +1518,10 @@ function renderRepos(data) {
   const repos = Object.entries(data).filter(([k]) => !k.startsWith('_'));
   document.getElementById('repos-meta').textContent = repos.length + ' repos';
   let h = '';
+  // Repo services
+  if (repos.length > 0) {
+    h += '<div class="section-label" style="font-size:9px;color:var(--accent);text-transform:uppercase;letter-spacing:.8px;margin-bottom:8px;font-weight:600">Serveis muntats</div>';
+  }
   for (const [repo, svcs] of repos) {
     if (!svcs||!svcs.length) continue;
     let sh = '';
@@ -1436,21 +1540,45 @@ function renderRepos(data) {
         if (m) port = m[1];
       }
       if (port) url = 'http://localhost:' + port;
-      sh += '<div class="svc '+(alive?'run':'stop')+'"><div class="svc-info"><strong>'+(alive?'&#x1f7e2; RUNNING':'&#x1f534; STOPPED')+' &middot; PID '+(s.pid||'?')+(url ? ' &middot; <a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(url)+'</a>' : '')+'</strong><br><code style="font-size:11px;word-break:break-all">'+esc(s.step_id||'')+'</code> <code style="font-size:11px;word-break:break-all">'+esc(cmd)+'</code></div>'+
+      sh += '<div class="svc '+(alive?'run':'stop')+'"><div class="svc-info"><strong>'+(alive?'&#x1f7e2; OK':'&#x1f534; STOP')+' &middot; PID '+(s.pid||'?')+(url ? ' &middot; <a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(url)+'</a>' : '')+'</strong><br><code style="font-size:11px;word-break:break-all">'+esc(s.step_id||'')+'</code> <code style="font-size:11px;word-break:break-all">'+esc(cmd)+'</code></div>'+
         '<div class="actions"><button class="small" data-view-logs="'+escUrl(repo)+'/'+escUrl(s.step_id||'')+'">Logs</button>'+
         '<button class="small" data-live-logs="'+escUrl(repo)+'">En directe</button>'+
         '<button class="small primary" data-restart-repo="'+escUrl(repo)+'">Restart</button>'+
         '<button class="small danger" data-stop-repo="'+escUrl(repo)+'">Stop</button></div></div>';
     }
-    h += '<div class="card"><h2>'+esc(repo)+'</h2>'+sh+
+    h += '<div class="card"><h2>&#x1f4c1; '+esc(repo)+'</h2>'+sh+
       '<div class="timeline" id="tl-'+escUrl(repo)+'" style="display:none;margin-top:8px"></div>'+
       '<div style="margin-top:4px"><button class="small" data-load-timeline="'+escUrl(repo)+'">Timeline</button></div>'+
       '</div>';
   }
-  // Sistema: mostrar TOTS els serveis de la màquina
+  // Databases section
+  var dbs = data._databases || [];
+  if (dbs.length > 0) {
+    h += '<div class="section-label" style="font-size:9px;color:var(--accent2);text-transform:uppercase;letter-spacing:.8px;margin:12px 0 8px;font-weight:600">Bases de dades</div>';
+    for (var di = 0; di < dbs.length; di++) {
+      var db = dbs[di];
+      var dbTypeIcon = db.type === 'postgresql' ? '&#x1f418;' : (db.type === 'mongodb' ? '&#x1f334;' : (db.type === 'mysql' ? '&#x1f42c;' : (db.type === 'redis' ? '&#x1f534;' : '&#x1f5c4;')));
+      h += '<div class="card" style="border-left-color:var(--accent2)">';
+      h += '<div style="display:flex;justify-content:space-between;align-items:center">';
+      h += '<strong style="color:var(--accent2)">'+dbTypeIcon+' '+esc(db.type)+'</strong>';
+      h += '<span style="font-size:10px;color:var(--muted)">'+esc(db.container||'')+'</span>';
+      h += '</div>';
+      h += '<div style="font-size:11px;margin-top:6px;color:var(--fg)">';
+      h += '<span style="color:var(--muted)">host:</span> localhost:' + esc(String(db.port||'?')) + ' &middot; ';
+      h += '<span style="color:var(--muted)">user:</span> agentuser &middot; ';
+      h += '<span style="color:var(--muted)">db:</span> agentdb';
+      h += '</div>';
+      if (db.connection_url) {
+        h += '<div style="margin-top:4px"><code style="font-size:10px;word-break:break-all;color:var(--accent)">'+esc(db.connection_url)+'</code></div>';
+      }
+      h += '</div>';
+    }
+  }
+  // Sistema
   var sysSvcs = data._system || [];
   if (sysSvcs.length > 0) {
-    h += '<div class="card" style="border-color:var(--accent2)"><h2 style="color:var(--accent2)">Sistema</h2>';
+    h += '<div class="section-label" style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin:12px 0 8px;font-weight:600">Sistema</div>';
+    h += '<div class="card" style="border-color:var(--border-light)">';
     h += '<div class="sys-svc-header"><span>Servei</span><span>Port</span><span>PID</span></div>';
     for (var si = 0; si < sysSvcs.length; si++) {
       var s = sysSvcs[si];

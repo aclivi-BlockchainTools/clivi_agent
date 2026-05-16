@@ -354,3 +354,40 @@ async def websocket_logs(ws: WebSocket, repo: str):
             await ws.send_json({"type": "heartbeat"})
     except (WebSocketDisconnect, Exception):
         pass
+
+
+@router.get("/api/browse-fs")
+async def api_browse_fs(request: Request):
+    """Explorador de sistema de fitxers per seleccionar carpetes."""
+    from pathlib import Path as _Path
+    params = parse_qs(str(request.query_params))
+    raw_path = params.get("path", [""])[0].strip()
+    if not raw_path:
+        raw_path = str(_Path.home())
+    p = _Path(raw_path).expanduser().resolve()
+    if not p.exists() or not p.is_dir():
+        return {"path": raw_path, "error": f"No existeix o no és un directori: {raw_path}", "entries": []}
+    # Seguretat: no permetre navegar certs directoris del sistema
+    restricted_parts = {"/proc", "/sys", "/dev", "/run"}
+    if str(p) in restricted_parts or any(str(p).startswith(r) for r in restricted_parts):
+        return {"path": str(p), "entries": []}
+    entries = []
+    try:
+        for child in sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+            if child.name.startswith("."):
+                continue
+            if child.is_dir():
+                try:
+                    has_children = any(True for _ in child.iterdir())
+                except (PermissionError, OSError):
+                    has_children = False
+                entries.append({
+                    "name": child.name,
+                    "path": str(child),
+                    "is_dir": True,
+                    "has_children": has_children,
+                })
+    except (PermissionError, OSError):
+        return {"path": str(p), "error": "Permís denegat", "entries": []}
+    parent = str(p.parent) if str(p) != "/" else None
+    return {"path": str(p), "parent": parent, "entries": entries}

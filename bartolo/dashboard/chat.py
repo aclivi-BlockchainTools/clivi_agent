@@ -430,12 +430,14 @@ def _build_access_message(repo_url: str, launch_log: Path,
 
 async def _send_follow_up(ws: WebSocket, thread_id: str, text: str) -> None:
     """Send a follow-up message on the WebSocket. Safe from background threads."""
+    import traceback, logging
+    _log = logging.getLogger("bartolo.dashboard")
     try:
         from bartolo.dashboard.chat_routes import persist_thread_message
         persist_thread_message(thread_id, "assistant", text)
         await ws.send_json({"type": "done", "full_text": text})
     except Exception:
-        pass
+        _log.error(f"_send_follow_up failed: {traceback.format_exc()}")
 
 
 async def _launch_agent(ws: WebSocket, thread_id: str, repo_url: str,
