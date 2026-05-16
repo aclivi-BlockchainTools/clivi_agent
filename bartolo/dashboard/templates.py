@@ -656,9 +656,15 @@ function buildWorkspaceForm(form, p) {
 function buildSecretForm(form, p) {
   const key = p.key || '';
   const hint = p.hint || '';
+  const desc = p.description || '';
+  const required = p.required !== false;
   const remaining = p.remaining || [];
-  form.innerHTML += '<div class="wizard-step-title">Secret requerit</div>';
-  form.innerHTML += '<div class="wizard-label">' + esc(p.label || key) + '</div>';
+
+  // Title with required/optional badge
+  const badgeCls = required ? 'badge bad' : 'badge info';
+  const badgeLabel = required ? 'Obligatori' : 'Opcional';
+  form.innerHTML += '<div class="wizard-step-title">' + esc(p.label || key) + ' <span class="' + badgeCls + '" style="font-size:10px">' + badgeLabel + '</span></div>';
+  if (desc) form.innerHTML += '<div style="font-size:11px;color:var(--fg);margin-bottom:10px;line-height:1.5">' + esc(desc) + '</div>';
   if (hint) form.innerHTML += '<div class="wizard-hint">Format: ' + esc(hint) + '</div>';
   const wrap = wizEl('div', 'wizard-input-wrap');
   const inp = wizInput('password', 'Valor per a ' + key, '', 'wizard-input');

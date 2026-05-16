@@ -599,10 +599,13 @@ def _build_wizard_step(step_name: str, wiz: WizardState) -> dict:
     elif step_name == "secret":
         if remaining:
             key = remaining[0]
+            meta = _secret_meta(key)
             payload = {
                 "key": key,
                 "label": key.replace("_", " ").title(),
                 "hint": _secret_hint(key),
+                "description": meta["description"],
+                "required": meta["required"],
                 "remaining": [s for s in remaining if s != key],
                 "found": wiz.found_secrets,
             }
@@ -642,7 +645,7 @@ def _build_wizard_step(step_name: str, wiz: WizardState) -> dict:
 
 
 def _secret_hint(key: str) -> str:
-    """Return a human-readable hint for a secret key."""
+    """Return a human-readable format hint for a secret key."""
     hints = {
         "SUPABASE_URL": "https://xxxxx.supabase.co",
         "SUPABASE_ANON_KEY": "eyJhbG... (JWT anon key)",
@@ -658,6 +661,136 @@ def _secret_hint(key: str) -> str:
         "ANTHROPIC_API_KEY": "sk-ant-...",
     }
     return hints.get(key, f"Valor per a {key}")
+
+
+def _secret_meta(key: str) -> dict:
+    """Return {description, required} for a secret key."""
+    meta = {
+        "SUPABASE_URL": {
+            "description": "URL del projecte Supabase. Necessari per connectar-se a la base de dades, auth i storage.",
+            "required": True,
+        },
+        "SUPABASE_ANON_KEY": {
+            "description": "Clau pública de Supabase per operacions de client (frontend).",
+            "required": True,
+        },
+        "SUPABASE_SERVICE_ROLE_KEY": {
+            "description": "Clau secreta de Supabase amb accés total al projecte (bypass Row Level Security).",
+            "required": True,
+        },
+        "SUPABASE_SERVICE_KEY": {
+            "description": "Clau de servei de Supabase. Alternativa a la service_role key.",
+            "required": True,
+        },
+        "DATABASE_URL": {
+            "description": "URL de connexió a la base de dades principal.",
+            "required": True,
+        },
+        "MONGODB_URI": {
+            "description": "URI de connexió a MongoDB Atlas.",
+            "required": True,
+        },
+        "STRIPE_SECRET_KEY": {
+            "description": "Clau secreta de Stripe per processar pagaments. Opcional si no uses pagaments.",
+            "required": False,
+        },
+        "STRIPE_PUBLISHABLE_KEY": {
+            "description": "Clau pública de Stripe pel frontend. Opcional si no uses pagaments.",
+            "required": False,
+        },
+        "STRIPE_WEBHOOK_SECRET": {
+            "description": "Secret per verificar webhooks de Stripe. Opcional si no uses webhooks.",
+            "required": False,
+        },
+        "JWT_SECRET": {
+            "description": "Clau per signar tokens JWT d'autenticació. Sense això els usuaris no poden iniciar sessió.",
+            "required": True,
+        },
+        "SECRET_KEY": {
+            "description": "Clau secreta de Django per xifrar sessions, CSRF, etc.",
+            "required": True,
+        },
+        "DJANGO_SECRET_KEY": {
+            "description": "Clau secreta de Django per xifrar sessions, CSRF, etc.",
+            "required": True,
+        },
+        "NEXTAUTH_SECRET": {
+            "description": "Clau per xifrar tokens de NextAuth.js. Necessari per autenticació.",
+            "required": True,
+        },
+        "ENCRYPTION_KEY": {
+            "description": "Clau Fernet (AES-256) per xifrar dades sensibles a la base de dades. Si no la poses, les dades xifrades no es podran llegir.",
+            "required": True,
+        },
+        "OPENAI_API_KEY": {
+            "description": "Clau API d'OpenAI per funcions d'IA. Opcional si no uses GPT.",
+            "required": False,
+        },
+        "ANTHROPIC_API_KEY": {
+            "description": "Clau API d'Anthropic (Claude). Opcional si no uses Claude.",
+            "required": False,
+        },
+        "SENDGRID_API_KEY": {
+            "description": "Clau API de SendGrid per enviar correus. Opcional si no envies emails.",
+            "required": False,
+        },
+        "RESEND_API_KEY": {
+            "description": "Clau API de Resend per enviar correus. Opcional si no envies emails.",
+            "required": False,
+        },
+        "TWILIO_ACCOUNT_SID": {
+            "description": "SID del compte Twilio per SMS/trucades. Opcional si no uses Twilio.",
+            "required": False,
+        },
+        "TWILIO_AUTH_TOKEN": {
+            "description": "Token d'autenticació de Twilio. Opcional si no uses Twilio.",
+            "required": False,
+        },
+        "AWS_ACCESS_KEY_ID": {
+            "description": "Clau d'accés AWS per S3, Lambda, etc. Opcional si no uses AWS.",
+            "required": False,
+        },
+        "AWS_SECRET_ACCESS_KEY": {
+            "description": "Clau secreta AWS. Opcional si no uses AWS.",
+            "required": False,
+        },
+        "GOOGLE_CLIENT_ID": {
+            "description": "Client ID de Google OAuth per login social. Opcional si no uses Google login.",
+            "required": False,
+        },
+        "GOOGLE_CLIENT_SECRET": {
+            "description": "Client Secret de Google OAuth. Opcional si no uses Google login.",
+            "required": False,
+        },
+        "GITHUB_CLIENT_ID": {
+            "description": "Client ID de GitHub OAuth per login social. Opcional si no uses GitHub login.",
+            "required": False,
+        },
+        "GITHUB_CLIENT_SECRET": {
+            "description": "Client Secret de GitHub OAuth. Opcional si no uses GitHub login.",
+            "required": False,
+        },
+        "GOOGLE_API_KEY": {
+            "description": "Clau API de Google (Gemini). Opcional si no uses Gemini.",
+            "required": False,
+        },
+        "HUGGINGFACE_API_KEY": {
+            "description": "Clau API de HuggingFace per models d'IA. Opcional si no uses HuggingFace.",
+            "required": False,
+        },
+        "FAL_KEY": {
+            "description": "Clau API de Fal.ai per generació d'imatges. Opcional si no uses Fal.ai.",
+            "required": False,
+        },
+        "EMERGENT_LLM_KEY": {
+            "description": "Clau per l'LLM d'Emergent. Opcional si no uses stack Emergent.",
+            "required": False,
+        },
+    }
+    return meta.get(key, {
+        "description": f"Valor de configuració per a {key}.",
+        "required": False,
+    })
 
 
 async def _advance_wizard(ws: WebSocket, thread_id: str, wiz: WizardState,
