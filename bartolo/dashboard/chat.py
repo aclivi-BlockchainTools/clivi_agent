@@ -72,14 +72,48 @@ def _analyze_repo_secrets(repo_url: str) -> dict:
     detected = detect_env_vars_from_code(acquired)
     cache = load_secrets_cache()
 
+    # Also read existing .env files in the cloned repo + workspace (may have real values)
+    existing_env: Dict[str, str] = {}
+    # Search the cloned repo and sibling repos in the workspace
+    search_roots = [acquired]
+    try:
+        for d in acquired.parent.iterdir():
+            if d.is_dir() and d.name != acquired.name:
+                search_roots.append(d)
+    except Exception:
+        pass
+    for root_dir in search_roots[:5]:  # limit to 5 dirs max
+        for env_path in root_dir.rglob(".env"):
+            if any(p in env_path.parts for p in ("node_modules", ".git", "__pycache__", "venv", ".venv")):
+                continue
+            try:
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, _, v = line.partition("=")
+                        k = k.strip()
+                        v = v.strip().strip('"').strip("'")
+                        if v and v not in ("", "your_", "changeme", "change_me", "example", "placeholder"):
+                            existing_env[k] = v
+            except Exception:
+                pass
+
     missing = []
     found = []
     for var in sorted(detected):
         if var in KNOWN_SECRET_KEYS:
             if var in cache and cache[var]:
                 found.append(var)
+            elif var in existing_env and existing_env[var]:
+                found.append(var)
+                # Also save to cache for future mounts
+                cache[var] = existing_env[var]
             else:
                 missing.append(var)
+
+    if existing_env:
+        from universal_repo_agent_v5 import save_secrets_cache
+        save_secrets_cache(cache)
 
     # Detecta serveis cloud amb alternativa local
     third_party = detect_third_party_services(acquired)
