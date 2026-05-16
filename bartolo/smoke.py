@@ -1,5 +1,6 @@
 """Smoke tests adaptatius per verificar que els serveis arrencats responen."""
 
+import os
 from typing import Any, Dict, List, Optional
 
 from bartolo.types import RepoAnalysis, SmokeResult
@@ -32,8 +33,22 @@ def run_smoke_tests(emergent: Optional[Dict[str, Any]], analysis: RepoAnalysis, 
     results: List[SmokeResult] = []
     tested_urls: set = set()
     if emergent:
-        backend = emergent.get("backend")
-        frontend = emergent.get("frontend")
+        be_path = emergent.get("backend")
+        fe_path = emergent.get("frontend")
+        svc_by_path = {os.path.realpath(svc.path): svc for svc in analysis.services}
+        backend = svc_by_path.get(os.path.realpath(be_path)) if be_path else None
+        frontend = svc_by_path.get(os.path.realpath(fe_path)) if fe_path else None
+        # Fallback: match by name if path lookup failed
+        if not backend:
+            for svc in analysis.services:
+                if svc.name == "backend":
+                    backend = svc
+                    break
+        if not frontend:
+            for svc in analysis.services:
+                if svc.name == "frontend":
+                    frontend = svc
+                    break
         if backend and backend.run_url and backend.run_url not in tested_urls:
             tested_urls.add(backend.run_url)
             for ep in _framework_endpoints(backend):

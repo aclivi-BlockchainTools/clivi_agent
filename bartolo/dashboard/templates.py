@@ -79,7 +79,7 @@ h1{color:var(--accent);margin:0 0 4px;font-size:18px}
 .msg.system{align-self:center;background:transparent;color:var(--muted);font-size:11px;font-style:italic;max-width:100%}
 .msg .token{color:var(--fg)}
 #chat-input-area{display:flex;gap:8px;padding:12px 0;border-top:1px solid var(--border)}
-#chat-input-area input{flex:1;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:10px 14px;border-radius:8px;font-family:inherit;font-size:13px}
+#chat-input-area textarea{flex:1;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:10px 14px;border-radius:8px;font-family:inherit;font-size:13px;resize:none;min-height:39px;max-height:120px;line-height:1.4}
 #chat-input-area button{background:var(--accent);color:#0d1117;border:0;padding:10px 18px;border-radius:8px;font-weight:bold;cursor:pointer;font-family:inherit;font-size:13px}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -184,6 +184,34 @@ pre.logs.output{max-height:300px;margin-top:8px}
 /* Logs stream */
 .logs-stream{background:var(--input-bg);border:1px solid var(--border);border-radius:6px;padding:8px;margin-top:8px;max-height:350px;overflow-y:auto;font-family:monospace;font-size:11px;color:var(--fg);white-space:pre-wrap;display:none}
 .logs-stream.show{display:block}
+/* Wizard forms in chat */
+.wizard-form{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;margin:4px 0;animation:fadeIn .2s}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+.wizard-progress-bar{width:100%;height:4px;background:var(--border);border-radius:2px;margin-bottom:12px}
+.wizard-progress-fill{height:100%;background:var(--accent);border-radius:2px;transition:width .3s}
+.wizard-step-title{font-size:13px;font-weight:600;color:var(--accent);margin-bottom:4px}
+.wizard-step-sub{font-size:11px;color:var(--muted);margin-bottom:12px}
+.wizard-label{display:block;font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+.wizard-input{width:100%;background:var(--input-bg);border:1px solid var(--border);color:var(--fg);padding:10px 12px;border-radius:6px;font-family:inherit;font-size:13px;margin-bottom:10px}
+.wizard-input:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 2px rgba(88,166,255,.15)}
+.wizard-input-wrap{position:relative}
+.wizard-input-wrap .wizard-toggle-vis{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:var(--border);border:0;color:var(--muted);padding:3px 8px;border-radius:4px;font-size:10px;cursor:pointer}
+.wizard-hint{font-size:10px;color:var(--warn);margin-bottom:10px;background:#2a1f0a;padding:6px 10px;border-radius:4px}
+.wizard-buttons{display:flex;gap:8px;justify-content:flex-end;margin-top:4px}
+.wizard-btn-primary{background:var(--accent);color:#0d1117;border:0;padding:8px 16px;border-radius:6px;font-weight:600;cursor:pointer;font-family:inherit;font-size:12px}
+.wizard-btn-primary:hover{opacity:.9}
+.wizard-btn-secondary{background:transparent;color:var(--muted);border:1px solid var(--border);padding:8px 16px;border-radius:6px;cursor:pointer;font-family:inherit;font-size:12px}
+.wizard-btn-skip{background:transparent;color:var(--warn);border:1px solid var(--warn);padding:8px 16px;border-radius:6px;cursor:pointer;font-family:inherit;font-size:12px}
+.wizard-toggle-group{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}
+.wizard-toggle-row{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--input-bg);border:1px solid var(--border);border-radius:6px}
+.wizard-toggle-row .wt-label{font-size:12px;color:var(--fg)}
+.wizard-toggle-row .wt-info{font-size:10px;color:var(--muted)}
+.wizard-summary{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}
+.wizard-summary-row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px}
+.wizard-summary-row:last-child{border-bottom:0}
+.wizard-summary-row .ws-label{color:var(--muted)}
+.wizard-summary-row .ws-val{color:var(--fg);font-weight:600}
+.wizard-masked{color:var(--warn)}
 """
 
 _HTML_BODY = """\
@@ -252,7 +280,7 @@ _HTML_BODY = """\
       </div>
       <div id="chat-messages"></div>
       <div id="chat-input-area">
-        <input type="text" id="chat-input" placeholder="Escriu un missatge... (↑ historial, Enter enviar)">
+        <textarea id="chat-input" placeholder="Escriu un missatge... (↑ historial, Enter enviar, Shift+Enter salt línia)" rows="1"></textarea>
         <button id="chat-send-btn">Enviar</button>
       </div>
     </div>
@@ -451,7 +479,10 @@ function connectWS() {
     ws.onmessage = (e) => {
       const data = JSON.parse(e.data);
       if (data.type === 'token') appendToken(data.token);
-      else if (data.type === 'done') finishMessage();
+      else if (data.type === 'done') {
+	        if (currentMsgEl) finishMessage();
+	        else if (data.full_text) addChatMessage('assistant', data.full_text);
+	      }
       else if (data.type === 'intent') addChatMessage('system', 'Intent: ' + data.intent);
       else if (data.type === 'error') addChatMessage('system', 'Error: ' + esc(data.error));
       else if (data.type === 'action') {
@@ -462,6 +493,25 @@ function connectWS() {
         document.getElementById('chat-messages').innerHTML = '';
         currentMsgEl = null;
         (data.messages||[]).forEach(m => addChatMessage(m.role, m.content));
+      }
+      else if (data.type === 'wizard_step') { renderWizardStep(data); }
+      else if (data.type === 'wizard_done') {
+        if (_currentWizardMsgEl) {
+          const el = _currentWizardMsgEl;
+          el.innerHTML = esc(data.message || 'Muntatge iniciat.');
+          el.style.whiteSpace = 'pre-wrap';
+          _currentWizardMsgEl = null;
+        }
+      }
+      else if (data.type === 'wizard_error') {
+        if (_currentWizardMsgEl) {
+          const el = _currentWizardMsgEl;
+          el.textContent = 'Error: ' + (data.error || 'Error desconegut');
+          el.style.color = 'var(--bad)';
+          _currentWizardMsgEl = null;
+        } else {
+          addChatMessage('system', 'Error wizard: ' + esc(data.error || ''));
+        }
       }
       else if (data.type === 'thread_created') {
         loadThreads().then(() => selectThread(data.thread.id, true));
@@ -488,6 +538,7 @@ function sendChat() {
   _historyIdx = -1;
   _savedInput = '';
   input.value = '';
+  autoResizeChatInput();
   currentMsgEl = null;
   ws.send(JSON.stringify({type:'chat', message:msg, thread_id:_currentThreadId}));
   // Refresh thread list after a moment
@@ -498,6 +549,7 @@ function addChatMessage(role, text) {
   const el = document.createElement('div');
   el.className = 'msg ' + role;
   el.textContent = text;
+  el.style.whiteSpace = 'pre-wrap';
   document.getElementById('chat-messages').appendChild(el);
   el.scrollIntoView({behavior:'smooth'});
 }
@@ -505,12 +557,212 @@ function appendToken(token) {
   if (!currentMsgEl) {
     currentMsgEl = document.createElement('div');
     currentMsgEl.className = 'msg assistant';
+    currentMsgEl.style.whiteSpace = 'pre-wrap';
     document.getElementById('chat-messages').appendChild(currentMsgEl);
   }
   currentMsgEl.textContent += token;
   currentMsgEl.scrollIntoView({behavior:'smooth'});
 }
 function finishMessage() { currentMsgEl = null; }
+
+// ===== WIZARD FORMS =====
+let _currentWizardMsgEl = null;
+
+function wizEl(tag, cls, attrs) {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (attrs) Object.entries(attrs).forEach(([k,v]) => { if (v != null) el[k] = v; });
+  return el;
+}
+function wizButton(text, cls, handler) {
+  const b = wizEl('button', cls);
+  b.textContent = text;
+  b.addEventListener('click', handler);
+  return b;
+}
+function wizInput(type, placeholder, val, cls) {
+  const i = wizEl('input', cls || 'wizard-input');
+  i.type = type;
+  if (placeholder) i.placeholder = placeholder;
+  if (val != null) i.value = val;
+  return i;
+}
+
+function clearWizard() {
+  if (_currentWizardMsgEl) { _currentWizardMsgEl.querySelector('.wizard-form').remove(); _currentWizardMsgEl = null; }
+}
+
+function wizBackButton() {
+  return wizButton('Tornar', 'wizard-btn-secondary', function() {
+    submitWizardResponse('_back', {action:'back'});
+  });
+}
+
+function submitWizardResponse(step, data) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({type:'wizard_response', thread_id:_currentThreadId, step:step, data:data}));
+}
+
+function renderWizardStep(data) {
+  const step = data.step;
+  const payload = data.payload || {};
+  const stepIndex = data.step_index != null ? data.step_index : 0;
+  const totalSteps = data.total_steps || 5;
+
+  // Find existing wizard bubble or create one
+  let wrapper;
+  if (_currentWizardMsgEl) {
+    wrapper = _currentWizardMsgEl;
+    // Remove old wizard form
+    const oldForm = wrapper.querySelector('.wizard-form');
+    if (oldForm) oldForm.remove();
+  } else {
+    wrapper = document.createElement('div');
+    wrapper.className = 'msg assistant';
+    wrapper.style.whiteSpace = 'normal';
+    document.getElementById('chat-messages').appendChild(wrapper);
+    _currentWizardMsgEl = wrapper;
+  }
+
+  const form = wizEl('div', 'wizard-form');
+  const total = data.total_steps || 5;
+
+  // Progress bar
+  const pct = total > 1 ? Math.round((stepIndex / (total - 1)) * 100) : 0;
+  form.innerHTML += '<div class="wizard-progress-bar"><div class="wizard-progress-fill" style="width:' + pct + '%"></div></div><div class="wizard-step-sub">Pas ' + (stepIndex + 1) + ' de ' + total + '</div>';
+
+  if (step === 'workspace') buildWorkspaceForm(form, payload);
+  else if (step === 'secret') buildSecretForm(form, payload);
+  else if (step === 'cloud_choice') buildCloudChoiceForm(form, payload);
+  else if (step === 'supabase_migrate') buildSupabaseMigrateForm(form, payload);
+  else if (step === 'confirm') buildConfirmForm(form, payload);
+
+  wrapper.appendChild(form);
+  form.scrollIntoView({behavior:'smooth'});
+}
+
+function buildWorkspaceForm(form, p) {
+  form.innerHTML += '<div class="wizard-step-title">Carpeta de muntatge</div>';
+  form.innerHTML += '<div class="wizard-label">On vols muntar <code style="background:var(--input-bg);padding:2px 6px;border-radius:3px">' + esc(p.repo_url || '') + '</code>?</div>';
+  const inp = wizInput('text', '', p.default_value || '', 'wizard-input');
+  form.appendChild(inp);
+  const btns = wizEl('div', 'wizard-buttons');
+  btns.appendChild(wizButton('Continua', 'wizard-btn-primary', function() {
+    submitWizardResponse('workspace', {workspace: inp.value});
+  }));
+  form.appendChild(btns);
+}
+
+function buildSecretForm(form, p) {
+  const key = p.key || '';
+  const hint = p.hint || '';
+  const remaining = p.remaining || [];
+  form.innerHTML += '<div class="wizard-step-title">Secret requerit</div>';
+  form.innerHTML += '<div class="wizard-label">' + esc(p.label || key) + '</div>';
+  if (hint) form.innerHTML += '<div class="wizard-hint">Format: ' + esc(hint) + '</div>';
+  const wrap = wizEl('div', 'wizard-input-wrap');
+  const inp = wizInput('password', 'Valor per a ' + key, '', 'wizard-input');
+  wrap.appendChild(inp);
+  const toggle = wizButton('Mostra', 'wizard-toggle-vis');
+  toggle.addEventListener('click', function() {
+    inp.type = inp.type === 'password' ? 'text' : 'password';
+    toggle.textContent = inp.type === 'password' ? 'Mostra' : 'Amaga';
+  });
+  wrap.appendChild(toggle);
+  form.appendChild(wrap);
+  if (remaining.length) {
+    const remDiv = wizEl('div', '');
+    remDiv.style.cssText = 'font-size:10px;color:var(--muted);margin-bottom:10px';
+    remDiv.textContent = 'Falten: ' + remaining.join(', ');
+    form.appendChild(remDiv);
+  }
+  const btns = wizEl('div', 'wizard-buttons');
+  btns.appendChild(wizBackButton());
+  btns.appendChild(wizButton('Ometre', 'wizard-btn-skip', function() {
+    submitWizardResponse('secret', {key:key, value:'', skipped:true});
+  }));
+  btns.appendChild(wizButton('Continua', 'wizard-btn-primary', function() {
+    submitWizardResponse('secret', {key:key, value:inp.value, skipped:false});
+  }));
+  form.appendChild(btns);
+  inp.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); submitWizardResponse('secret', {key:key, value:inp.value, skipped:false}); } });
+  setTimeout(function() { inp.focus(); }, 100);
+}
+
+function buildCloudChoiceForm(form, p) {
+  const services = p.services || [];
+  form.innerHTML += '<div class="wizard-step-title">Serveis Cloud</div>';
+  form.innerHTML += '<div class="wizard-label">Tria si vols usar els serveis cloud originals o alternatiu local Docker</div>';
+  const group = wizEl('div', 'wizard-toggle-group');
+  const choices = {};
+  services.forEach(function(svc) {
+    const row = wizEl('div', 'wizard-toggle-row');
+    const info = wizEl('div', '');
+    info.innerHTML = '<div class="wt-label">' + esc(svc.label) + '</div><div class="wt-info">Cloud original o ' + esc(svc.local) + ' via Docker</div>';
+    row.appendChild(info);
+    // Toggle: off = local, on = cloud
+    const toggle = wizEl('label', 'toggle');
+    const chk = wizEl('input', '');
+    chk.type = 'checkbox';
+    chk.checked = false; // default local
+    choices[svc.key] = 'local';
+    chk.addEventListener('change', function() { choices[svc.key] = chk.checked ? 'cloud' : 'local'; });
+    toggle.appendChild(chk);
+    toggle.appendChild(wizEl('span', 'slider'));
+    row.appendChild(toggle);
+    group.appendChild(row);
+    choices[svc.key] = 'local'; // initialize
+  });
+  form.appendChild(group);
+  const btns = wizEl('div', 'wizard-buttons');
+  btns.appendChild(wizBackButton());
+  btns.appendChild(wizButton('Continua', 'wizard-btn-primary', function() {
+    submitWizardResponse('cloud_choice', {choices:choices});
+  }));
+  form.appendChild(btns);
+}
+
+function buildSupabaseMigrateForm(form, p) {
+  form.innerHTML += '<div class="wizard-step-title">Migració de Supabase</div>';
+  form.innerHTML += '<div class="wizard-label">' + esc(p.question || 'Vols replicar les dades al PostgreSQL local?') + '</div>';
+  form.innerHTML += '<div style="font-size:11px;color:var(--muted);margin-bottom:12px">' + esc(p.description || '') + '</div>';
+  const btns = wizEl('div', 'wizard-buttons');
+  btns.appendChild(wizBackButton());
+  btns.appendChild(wizButton('No, gràcies', 'wizard-btn-secondary', function() {
+    submitWizardResponse('supabase_migrate', {migrate:false});
+  }));
+  btns.appendChild(wizButton('Sí, replica dades', 'wizard-btn-primary', function() {
+    submitWizardResponse('supabase_migrate', {migrate:true});
+  }));
+  form.appendChild(btns);
+}
+
+function buildConfirmForm(form, p) {
+  form.innerHTML += '<div class="wizard-step-title">Confirmació</div>';
+  const summary = wizEl('div', 'wizard-summary');
+  summary.innerHTML += '<div class="wizard-summary-row"><span class="ws-label">Workspace</span><span class="ws-val">' + esc(p.workspace || '') + '</span></div>';
+  summary.innerHTML += '<div class="wizard-summary-row"><span class="ws-label">Repo</span><span class="ws-val">' + esc(p.repo_url || '') + '</span></div>';
+  if (p.secrets && Object.keys(p.secrets).length) {
+    const keys = Object.keys(p.secrets).map(function(k) { return '<span class="wizard-masked">' + esc(k) + '</span>'; }).join(', ');
+    summary.innerHTML += '<div class="wizard-summary-row"><span class="ws-label">Secrets</span><span class="ws-val">' + keys + '</span></div>';
+  }
+  if (p.cloud_choices && Object.keys(p.cloud_choices).length) {
+    Object.entries(p.cloud_choices).forEach(function(e) {
+      const icon = e[1] === 'local' ? '(local Docker)' : '(cloud)';
+      summary.innerHTML += '<div class="wizard-summary-row"><span class="ws-label">' + esc(e[0]) + '</span><span class="ws-val">' + esc(icon) + '</span></div>';
+    });
+  }
+  if (p.supabase_migrate) {
+    summary.innerHTML += '<div class="wizard-summary-row"><span class="ws-label">Migració Supabase</span><span class="ws-val">Sí</span></div>';
+  }
+  form.appendChild(summary);
+  const btns = wizEl('div', 'wizard-buttons');
+  btns.appendChild(wizBackButton());
+  btns.appendChild(wizButton('Munta', 'wizard-btn-primary', function() {
+    submitWizardResponse('confirm', {});
+  }));
+  form.appendChild(btns);
+}
 
 // ===== INPUT HISTORY (arrow up/down) =====
 document.getElementById('chat-input').addEventListener('keydown', function(e) {
@@ -541,6 +793,13 @@ document.getElementById('chat-input').addEventListener('keydown', function(e) {
 });
 
 document.getElementById('chat-send-btn').addEventListener('click', sendChat);
+
+function autoResizeChatInput() {
+  const ta = document.getElementById('chat-input');
+  ta.style.height = 'auto';
+  ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
+}
+document.getElementById('chat-input').addEventListener('input', autoResizeChatInput);
 
 // ===== THREAD MANAGEMENT =====
 async function loadThreads() {
@@ -730,7 +989,20 @@ function renderRepos(data) {
     let sh = '';
     for (const s of svcs) {
       const alive = !!s.pid;
-      sh += '<div class="svc '+(alive?'run':'stop')+'"><div class="svc-info"><strong>'+(alive?'&#x1f7e2; RUNNING':'&#x1f534; STOPPED')+' &middot; PID '+(s.pid||'?')+'</strong> &middot; step: <code>'+esc(s.step_id||'')+'</code><code>'+esc(s.command||'')+'</code></div>'+
+      // Extract URL from command
+      let url = '';
+      let port = '';
+      const cmd = s.command||'';
+      let m = cmd.match(/(?:PORT|port|--port)[= ](\d{4,5})/);
+      if (m) port = m[1];
+      if (!port) {
+        const parts = cmd.split(/\s+/);
+        const last = parts[parts.length-1];
+        m = last.match(/:(\d{4,5})\b/);
+        if (m) port = m[1];
+      }
+      if (port) url = 'http://localhost:' + port;
+      sh += '<div class="svc '+(alive?'run':'stop')+'"><div class="svc-info"><strong>'+(alive?'&#x1f7e2; RUNNING':'&#x1f534; STOPPED')+' &middot; PID '+(s.pid||'?')+(url ? ' &middot; <a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(url)+'</a>' : '')+'</strong><br><code style="font-size:11px;word-break:break-all">'+esc(s.step_id||'')+'</code> <code style="font-size:11px;word-break:break-all">'+esc(cmd)+'</code></div>'+
         '<div class="actions"><button class="small" data-view-logs="'+escUrl(repo)+'/'+escUrl(s.step_id||'')+'">Logs</button>'+
         '<button class="small" data-live-logs="'+escUrl(repo)+'">En directe</button>'+
         '<button class="small primary" data-restart-repo="'+escUrl(repo)+'">Restart</button>'+
@@ -794,7 +1066,8 @@ function renderDatabases(data) {
   }
   let h = '<table><thead><tr><th>Nom</th><th>Imatge</th><th>Ports</th><th>Connexió</th></tr></thead><tbody>';
   for (const db of data.containers) {
-    h += '<tr><td><strong>'+esc(db.name)+'</strong><br><span class="badge ok">'+esc(db.status||'')+'</span></td><td>'+esc(db.image||'')+'</td><td>'+esc(db.ports||'')+'</td><td style="color:var(--accent)">'+esc(db.connect_url||'')+'</td></tr>';
+    const cmd = db.connect_cmd ? '<br><code style="font-size:11px">'+esc(db.connect_cmd)+'</code>' : '';
+    h += '<tr><td><strong>'+esc(db.name)+'</strong><br><span class="badge ok">'+esc(db.status||'')+'</span></td><td>'+esc(db.image||'')+'</td><td>'+esc(db.ports||'')+'</td><td style="color:var(--accent)">'+esc(db.connect_url||'')+cmd+'</td></tr>';
   }
   h += '</tbody></table>';
   document.getElementById('db-content').innerHTML = h;

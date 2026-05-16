@@ -80,15 +80,27 @@ async def api_restart(request: Request):
     repo_path = DEFAULT_WORKSPACE / repo
     if not repo_path.exists():
         return {"ok": False, "error": f"Repo {repo} no trobat"}
-    import time
+    log_dir = DEFAULT_WORKSPACE / LOG_DIRNAME
+    log_dir.mkdir(parents=True, exist_ok=True)
+    idx = len(list(log_dir.glob("dashboard-restart-*")))
+    restart_log = log_dir / f"dashboard-restart-{idx}.log"
 
     def _restart():
-        subprocess.run(
-            [sys.executable, str(AGENT_SCRIPT), "--input", str(repo_path), "--execute",
-             "--approve-all", "--non-interactive", "--no-readme", "--no-model-refine",
-             "--workspace", str(DEFAULT_WORKSPACE)],
-            capture_output=True, text=True, timeout=600, cwd=str(DEFAULT_WORKSPACE)
-        )
+        try:
+            with restart_log.open("w") as f:
+                cmd = [sys.executable, str(AGENT_SCRIPT), "--input", str(repo_path), "--execute",
+                       "--approve-all", "--non-interactive", "--no-readme", "--no-model-refine",
+                       "--workspace", str(DEFAULT_WORKSPACE)]
+                f.write(f"CMD: {' '.join(cmd)}\n\n")
+                f.flush()
+                subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT,
+                               text=True, timeout=600, cwd=str(DEFAULT_WORKSPACE))
+        except subprocess.TimeoutExpired:
+            with restart_log.open("a") as f:
+                f.write("\n[TIMEOUT] L'agent ha excedit els 10 minuts\n")
+        except Exception as e:
+            with restart_log.open("a") as f:
+                f.write(f"\n[ERROR] {e}\n")
     threading.Thread(target=_restart, daemon=True).start()
     return {"ok": True, "message": f"Reiniciant {repo}"}
 

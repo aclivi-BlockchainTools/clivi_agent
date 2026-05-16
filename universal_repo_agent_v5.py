@@ -688,9 +688,22 @@ KNOWN_SECRET_KEYS = {
     "STRIPE_SECRET_KEY", "STRIPE_API_KEY", "STRIPE_PUBLISHABLE_KEY", "STRIPE_WEBHOOK_SECRET",
     "SENDGRID_API_KEY", "RESEND_API_KEY", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN",
     "JWT_SECRET", "SECRET_KEY", "DJANGO_SECRET_KEY", "NEXTAUTH_SECRET",
-    "MONGODB_URI_ATLAS", "SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_KEY",
+    "MONGODB_URI_ATLAS", "SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_KEY", "SUPABASE_SERVICE_ROLE_KEY",
     "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET",
     "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET", "HUGGINGFACE_API_KEY", "FAL_KEY",
+    "ENCRYPTION_KEY",
+}
+
+# Claus que l'app gestiona internament (admin panel, Supabase) — no secrets a demanar
+SELF_CONFIGURED_KEYS = {
+    "WHATSAPP_ACCESS_TOKEN", "WHATSAPP_VERIFY_TOKEN", "WHATSAPP_PHONE_NUMBER_ID",
+    "WHATSAPP_BUSINESS_ACCOUNT_ID", "WHATSAPP_API_URL", "WHATSAPP_APP_SECRET",
+}
+
+# Variables de configuració amb defaults, no secrets
+NON_SECRET_CONFIG_KEYS = {
+    "BASE_URL", "CORS_ORIGINS", "NODE_ENV", "REACT_APP_BACKEND_URL",
+    "PORT", "HOST", "DEBUG", "LOG_LEVEL", "API_URL", "BACKEND_URL",
 }
 
 
@@ -861,7 +874,7 @@ def check_and_warn_native_deps(root: Path) -> List[str]:
 THIRD_PARTY_SERVICES: Dict[str, Dict[str, Any]] = {
     "supabase": {
         "patterns": [r"supabase(-js)?", r"@supabase/supabase-js", r"from\s+supabase", r"create_client"],
-        "secrets": ["SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_KEY"],
+        "secrets": ["SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_KEY", "SUPABASE_SERVICE_ROLE_KEY"],
         "help_url": "https://app.supabase.com/project/_/settings/api",
         "label": "Supabase",
     },

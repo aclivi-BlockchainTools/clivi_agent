@@ -52,15 +52,38 @@ def print_plan(plan: ExecutionPlan) -> None:
             print(f"    verify: {v}")
 
 
-def print_final_summary(analysis: RepoAnalysis, plan: ExecutionPlan, results: List[ExecutionResult], errors: List[StepError], log_dir: Path) -> None:
+def print_final_summary(analysis: RepoAnalysis, plan: ExecutionPlan, results: List[ExecutionResult], errors: List[StepError], log_dir: Path, workspace: Path = None) -> None:
     unrepaired = [e for e in errors if not e.repaired]
     print("\n=== RESUM FINAL ===")
     print(f"Passos totals: {len(results)}")
     print(f"Errors no reparats: {len(unrepaired)}")
-    urls = sorted({svc.run_url for svc in analysis.services if svc.run_url})
+    # Use actual running URLs from services registry (not detected ones which may have stale ports)
+    urls = set()
+    if workspace:
+        try:
+            from bartolo.executor import load_services_registry
+            data = load_services_registry(workspace)
+            import re
+            for svcs in data.values():
+                for svc in svcs if isinstance(svcs, list) else []:
+                    cmd = svc.get("command", "")
+                    port = None
+                    for m in re.finditer(r'(?:PORT|port|--port)[= ](\d{4,5})', cmd):
+                        port = m.group(1)
+                    if not port:
+                        parts = cmd.split()
+                        if parts:
+                            m = re.search(r':(\d{4,5})\b', parts[-1])
+                            port = m.group(1) if m else None
+                    if port:
+                        urls.add(f"http://localhost:{port}")
+        except Exception:
+            pass
+    if not urls:
+        urls = sorted({svc.run_url for svc in analysis.services if svc.run_url})
     if urls:
         print("URLs:")
-        for url in urls:
+        for url in sorted(urls):
             print(f"- {url}")
     if analysis.cloud_services:
         print("\n☁️  Serveis cloud detectats → alternativa local provisionada:")

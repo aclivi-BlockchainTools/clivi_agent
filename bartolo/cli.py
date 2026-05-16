@@ -283,7 +283,7 @@ def main() -> int:
             analysis=analysis, plan=plan, model=args.model, workspace=workspace,
             approve_all=args.approve_all, dry_run=False,
         )
-        print_final_summary(analysis, plan, results, errors, log_dir)
+        print_final_summary(analysis, plan, results, errors, log_dir, workspace=workspace)
         if not args.no_smoke:
             time.sleep(3)
             smoke = run_smoke_tests(emergent, analysis)
@@ -295,8 +295,31 @@ def main() -> int:
                 print(f"   {k}={v}")
         if emergent:
             print("\n🟢 Emergent stack iniciat:")
-            print("   Backend : http://localhost:8001/api/")
-            print("   Frontend: http://localhost:3000")
+            # Read actual running URLs from services registry
+            from bartolo.executor import load_services_registry
+            import re as _re
+            reg = load_services_registry(workspace)
+            for svc_name, svcs in reg.items():
+                if isinstance(svcs, list):
+                    for svc in svcs:
+                        cmd = svc.get("command", "")
+                        port = None
+                        for m in _re.finditer(r'(?:PORT|port|--port)[= ](\d{4,5})', cmd):
+                            port = m.group(1)
+                        if not port:
+                            parts = cmd.split()
+                            if parts:
+                                m = _re.search(r':(\d{4,5})\b', parts[-1])
+                                port = m.group(1) if m else None
+                        label = svc.get("step_id", "")
+                        if "frontend" in label or "fe" in label:
+                            label = "Frontend"
+                        elif "backend" in label or "be" in label or "api" in label:
+                            label = "Backend"
+                        if port:
+                            print(f"   {label} : http://localhost:{port}")
+                        else:
+                            print(f"   {label} : PID {svc.get('pid', '?')}")
             if analysis.db_provisioned:
                 for db in analysis.db_provisioned:
                     cfg = DB_DOCKER_CONFIGS.get(db, {})

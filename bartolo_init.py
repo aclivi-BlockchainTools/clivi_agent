@@ -146,7 +146,7 @@ def main() -> int:
         return 1
 
     print_final_summary(analysis, plan, results, errors,
-                        workspace / ".agent_logs")
+                        workspace / ".agent_logs", workspace=workspace)
 
     if any(e for e in errors if not e.repaired):
         return 1
