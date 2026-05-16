@@ -49,7 +49,9 @@ L'usuari final coneix el sistema com **"Bartolo"** (el nom del model d'OpenWebUI
 | `bartolo/kb/` | KB d'èxits (success_kb) | 90 |
 | `agents/debugger.py` | Compatibility shim → bartolo.repair | 16 |
 | `agents/success_kb.py` | Compatibility shim → bartolo.kb | 3 |
-| `dashboard.py` | UI web :9999 | 254 |
+| `dashboard.py` | Entry point :9999 | 54 |
+| `bartolo/dashboard/chat.py` | WebSocket xat + wizard interactiu + router dispatch | 1088 |
+| `bartolo/dashboard/templates.py` | HTML+CSS+JS inline (wizard forms, chat UI, threads) | 1759 |
 | `bench.sh` | Bateria de proves automatitzada (11 repos complets, 6 quick) | 85 |
 | `stress_test.sh` | Bateria d'estrès amb repos complexos (7 repos, detecció) | 110 |
 | `setup_ubuntu.sh` | Instal·lador Node/Docker/Ollama/qwen2.5:14b | 190 |
@@ -525,6 +527,33 @@ la recollida d'estatus correctament."
 
 **Fix:** `if repo.startswith("_"): continue` al bucle `for repo, svcs in ws.items()`.
 La tool actualitzada a OpenWebUI via SQLite (`/app/backend/data/webui.db`).
+
+### ✅ [RESOLT 2026-05-16] Wizard interactiu al xat del dashboard
+
+Quan l'usuari demana muntar un repo que requereix secrets o té serveis cloud,
+el dashboard ara mostra un wizard pas a pas amb formularis HTML dins les bombolles
+de xat (vanilla JS + DOM, sense dependències).
+
+**Passos del wizard (dinàmics segons el repo):**
+1. **workspace** — input text amb default `~/Projects/agent-workspace`
+2. **secret** — un pas per cada secret missing. Input password + toggle visibilitat + hint. "Ometre" / "Continua"
+3. **cloud_choice** — toggles per serveis cloud (local Docker vs cloud original)
+4. **supabase_migrate** — només si Supabase detectat. "Sí, replica dades" / "No, gràcies"
+5. **confirm** — targeta resum amb totes les opcions. Botó "Munta"
+
+**Funcionalitats:**
+- Botó "Tornar" a tots els passos (reversió d'estat correcta)
+- Barra de progrés (`wizard-progress-bar`) amb percentatge
+- Reconnexió WebSocket: si es recarrega la pàgina, es reenvia el pas actual
+- Neteja d'estat al `WebSocketDisconnect`
+- `SELF_CONFIGURED_KEYS` (WhatsApp, etc.) i `NON_SECRET_CONFIG_KEYS` (BASE_URL, PORT...) exclosos del wizard
+
+**Fitxers modificats:**
+- `bartolo/dashboard/chat.py`: `WizardState` dataclass, 8 funcions de state machine, handler `wizard_response`
+- `bartolo/dashboard/templates.py`: CSS + JS (5 builders, `renderWizardStep`, `submitWizardResponse`, `clearWizard`)
+- `universal_repo_agent_v5.py`: `KNOWN_SECRET_KEYS`, `SELF_CONFIGURED_KEYS`, `NON_SECRET_CONFIG_KEYS`
+
+**Nous tipus WebSocket:** `wizard_step`, `wizard_response`, `wizard_done`, `wizard_error`
 
 ## Problemes coneguts pendents
 
