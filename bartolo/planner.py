@@ -733,6 +733,14 @@ def build_emergent_plan(root: Path, emergent: Dict[str, Any]) -> ExecutionPlan:
             expected_outcome=f"React servint a :{fe_port}", category="run", critical=False,
             verify_port=fe_port, verify_url=f"http://localhost:{fe_port}",
         ))
+    # Post-install: fix .bin/craco symlink (yarn sometimes copies the file instead
+    # of symlinking, which breaks require.resolve("../scripts/start") in craco)
+    steps.append(CommandStep(
+        id="emergent-fe-bin-fix", title="Frontend: fix craco symlink",
+        cwd=str(frontend),
+        command="[ -f node_modules/.bin/craco ] && [ ! -L node_modules/.bin/craco ] && rm node_modules/.bin/craco && ln -sf ../@craco/craco/dist/bin/craco.js node_modules/.bin/craco; true",
+        expected_outcome="craco symlink corregit", category="install", critical=False,
+    ))
         notes.append("⚠️  Yarn no trobat. Instal·la'l (sudo npm install -g yarn) per evitar conflictes de peer deps.")
     notes.append(f"Backend: http://localhost:{be_port}  ·  Frontend: http://localhost:{fe_port}")
     notes.append("Totes les rutes backend han d'estar prefixades amb /api (ingress Emergent).")
