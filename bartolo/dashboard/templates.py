@@ -2259,15 +2259,21 @@ async function loadOverview() {
 
 function renderOverview(status, models, db) {
   const repos = Object.entries(status).filter(function(e) { return !e[0].startsWith('_'); });
-  let running = 0, stopped = 0;
+  let activeRepos = 0, stoppedRepos = 0, running = 0, stopped = 0;
   repos.forEach(function(e) {
     var svcs = e[1];
     if (!svcs || !svcs.length) return;
-    svcs.forEach(function(s) { s.pid ? running++ : stopped++; });
+    var hasRunning = false, hasStopped = false;
+    svcs.forEach(function(s) {
+      if (s.pid) { running++; hasRunning = true; }
+      else { stopped++; hasStopped = true; }
+    });
+    if (hasRunning) activeRepos++;
+    else if (hasStopped) stoppedRepos++;
   });
   document.getElementById('visio-repos').innerHTML =
-    '<span class="stat-num">'+running+'</span><span class="stat-label"> actius</span> &middot; ' +
-    '<span class="stat-num" style="color:var(--muted)">'+stopped+'</span><span class="stat-label"> aturats</span>';
+    '<span class="stat-num">'+activeRepos+'</span><span class="stat-label"> actius</span> &middot; ' +
+    '<span class="stat-num" style="color:var(--muted)">'+running+'</span><span class="stat-label"> serveis</span>';
 
   var modelCount = (models.models || []).length;
   var modelNames = (models.models || []).slice(0,3).map(function(m) { return m.name; }).join(', ');
