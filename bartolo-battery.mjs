@@ -16,6 +16,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, appendFileSync } fr
 import { resolve, basename } from 'path';
 import { execSync } from 'child_process';
 import { homedir } from 'os';
+import WebSocket from 'ws';
 
 // ===== CONFIGURACIÓ =====
 const DASHBOARD_URL = 'http://localhost:9999';
@@ -139,19 +140,19 @@ function checkPrerequisites() {
 // ===== WEBSOCKET =====
 function connectWebSocket(url, onMessage, onError) {
   return new Promise((resolve, reject) => {
-    const WebSocket = globalThis.WebSocket;
     const ws = new WebSocket(url);
-    ws.onopen = () => resolve(ws);
-    ws.onmessage = (ev) => {
+    ws.on('open', () => resolve(ws));
+    ws.on('message', (data, isBinary) => {
+      if (isBinary) return;
       try {
-        const data = JSON.parse(ev.data);
-        onMessage(data);
-      } catch { /* ignore non-JSON frames */ }
-    };
-    ws.onerror = (err) => {
+        const parsed = JSON.parse(data.toString());
+        onMessage(parsed);
+      } catch { /* ignore non-JSON */ }
+    });
+    ws.on('error', (err) => {
       if (onError) onError(err);
       reject(err);
-    };
+    });
   });
 }
 
