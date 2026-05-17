@@ -237,17 +237,18 @@ async function revertSabotage(repoName, sabotage) {
   }
 }
 
-// ===== LLANÇAMENT =====
-async function launchRepo(repoPath, intentDir) {
-  console.log(`  [launch] ${repoPath}`);
-  const body = `input=${encodeURIComponent(repoPath)}&approve_all=on`;
-  const res = await apiFetch('/api/launch', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body,
-  });
-  writeFileSync(resolve(intentDir, 'launch-response.json'), JSON.stringify(res, null, 2));
-  return res;
+// ===== LLANÇAMENT VIA XAT (envia "munta <path>" pel WebSocket) =====
+async function launchViaChat(chatWs, repoPath, intentDir) {
+  const message = `munta ${repoPath}`;
+  console.log(`  [launch:chat] Enviant "${message}" pel WS...`);
+  chatWs.send(JSON.stringify({ type: 'chat', message }));
+  // El dashboard respondrà amb events (action, agent_output, repair_event, done)
+  // a través del mateix WebSocket. No esperem resposta aquí.
+  writeFileSync(resolve(intentDir, 'launch-message.json'), JSON.stringify({
+    sent: nowISO(),
+    message,
+    type: 'chat',
+  }, null, 2));
 }
 
 // ===== TRACKER D'EVENTS DEL WEBSOCKET DE XAT =====
@@ -615,8 +616,8 @@ async function runIntent(page, repo, intentNum, runDir, shouldSabotage) {
     await sleep(2000);
   }
 
-  // 3d. Llançament
-  await launchRepo(repoPath, intentDir);
+  // 3d. Llançament via xat (missatge "munta <path>" pel WebSocket)
+  await launchViaChat(chatWs, repoPath, intentDir);
 
   // 3e. WebSocket de logs
   console.log(`  [ws:logs] Connectant...`);
