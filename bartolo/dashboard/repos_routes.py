@@ -295,6 +295,30 @@ async def api_launch(request: Request):
     return {"ok": True, "message": f"Llançant {input_value}"}
 
 
+@router.get("/api/timeline")
+async def api_timeline_global():
+    """Extract recent timeline events from all agent log files."""
+    log_dir = DEFAULT_WORKSPACE / LOG_DIRNAME
+    events = []
+    if not log_dir.exists():
+        return {"events": events}
+    import re
+    for f in sorted(log_dir.glob("*.log"), key=lambda x: x.stat().st_mtime, reverse=True)[:10]:
+        try:
+            content = f.read_text(encoding="utf-8", errors="ignore")
+            for line in content.split("\n"):
+                ts_match = re.match(r'^\[?(\d{2}:\d{2}(?::\d{2})?)\]?\s*(.+)$', line)
+                if ts_match:
+                    events.append({"time": ts_match.group(1), "event": ts_match.group(2)[:200]})
+                elif re.search(r'(ERROR|FAIL|FATAL)', line, re.IGNORECASE):
+                    events.append({"time": "", "event": line[:200], "level": "error"})
+                elif re.search(r'(SUCCESS|OK|complet|CORRECTE|iniciat)', line, re.IGNORECASE):
+                    events.append({"time": "", "event": line[:200], "level": "ok"})
+        except Exception:
+            pass
+    return {"events": events[-40:]}
+
+
 @router.get("/api/timeline/{repo}")
 async def api_timeline(repo: str):
     """Extract timeline events from agent log files."""

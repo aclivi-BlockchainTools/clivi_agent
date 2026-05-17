@@ -2245,19 +2245,21 @@ const TAB_ORDER = ['visio','chat','models','repos','databases','secrets','tools'
 
 async function loadOverview() {
   try {
-    const [statusR, modelsR, dbR] = await Promise.all([
+    const [statusR, modelsR, dbR, timelineR] = await Promise.all([
       apiFetch('/api/status'),
       apiFetch('/api/models'),
-      apiFetch('/api/databases')
+      apiFetch('/api/databases'),
+      apiFetch('/api/timeline')
     ]);
     const status = await statusR.json();
     const models = await modelsR.json();
     const db = await dbR.json();
-    renderOverview(status, models, db);
+    const tl = await timelineR.json();
+    renderOverview(status, models, db, tl);
   } catch(e) {}
 }
 
-function renderOverview(status, models, db) {
+function renderOverview(status, models, db, tl) {
   const repos = Object.entries(status).filter(function(e) { return !e[0].startsWith('_'); });
   let activeRepos = 0, stoppedRepos = 0, running = 0, stopped = 0;
   repos.forEach(function(e) {
@@ -2274,6 +2276,20 @@ function renderOverview(status, models, db) {
   document.getElementById('visio-repos').innerHTML =
     '<span class="stat-num">'+activeRepos+'</span><span class="stat-label"> actius</span> &middot; ' +
     '<span class="stat-num" style="color:var(--muted)">'+running+'</span><span class="stat-label"> serveis</span>';
+
+  // Timeline
+  var tlEvents = (tl && tl.events) ? tl.events : [];
+  var tlHtml = '';
+  if (tlEvents.length) {
+    for (var i = 0; i < Math.min(tlEvents.length, 15); i++) {
+      var e = tlEvents[i];
+      var cls = e.level === 'error' ? 'bad' : (e.level === 'ok' ? 'ok' : '');
+      tlHtml += '<div class="timeline-item '+cls+'"><span class="tl-time">'+esc(e.time||'')+'</span> <span class="tl-event">'+esc(e.event)+'</span></div>';
+    }
+  } else {
+    tlHtml = '<div class="timeline-item"><span class="tl-event" style="color:var(--muted)">Cap event recent</span></div>';
+  }
+  document.getElementById('visio-timeline').innerHTML = tlHtml;
 
   var modelCount = (models.models || []).length;
   var modelNames = (models.models || []).slice(0,3).map(function(m) { return m.name; }).join(', ');
