@@ -54,6 +54,7 @@ L'usuari final coneix el sistema com **"Bartolo"** (el nom del model d'OpenWebUI
 | `bartolo/dashboard/templates.py` | HTML+CSS+JS inline (wizard forms, chat UI, threads) | 2253 |
 | `bartolo/dashboard/repos_routes.py` | API status/logs/stop/launch/timeline/WS + escàner serveis sistema | 356 |
 | `bartolo/dashboard/chat_routes.py` | API xat, historial, reparacions | 217 |
+| `bartolo-goal.mjs` | Playwright: muntatge automatitzat via dashboard :9999, wizard, captura sessió | 430 |
 | `bench.sh` | Bateria de proves automatitzada (11 repos complets, 6 quick) | 85 |
 | `stress_test.sh` | Bateria d'estrès amb repos complexos (7 repos, detecció) | 110 |
 | `setup_ubuntu.sh` | Instal·lador Node/Docker/Ollama/qwen2.5:14b | 190 |
@@ -637,6 +638,42 @@ Abans el wizard usava `~/Projects/agent-workspace` per defecte però el dashboar
 i la pestanya Repos usen `DEFAULT_WORKSPACE` (`~/universal-agent-workspace`).
 Els serveis muntats no apareixien a Repos perquè estaven a un workspace diferent.
 Fix: `str(Path(wiz.workspace or str(DEFAULT_WORKSPACE)).expanduser())`
+
+### ✅ [RESOLT 2026-05-17] Fix #15 — `[` (test) rebutjat pel validador
+
+La comanda de reparació del symlink craco (`[ -f node_modules/.bin/craco ] && ...`)
+era rebutjada perquè `[` no estava a `SAFE_COMMAND_PREFIXES`.
+Fix: afegit `"["` a la whitelist de `validator.py`.
+
+### ✅ [RESOLT 2026-05-17] Etiquetatge de BDs amb nom del repo
+
+Les bases de dades Docker al dashboard ara mostren a quin repo pertanyen.
+- `_container_owners.json` al workspace: mapeig `{container_name: repo_name}`
+- `_finalize_wizard()` a `chat.py` guarda el mapeig després de crear contenidors
+- `api_status()` a `repos_routes.py` inclou `repo` a cada entrada de BD
+- Frontend `renderRepos()` mostra `[repo_name]` en verd al costat del nom del contenidor
+
+### ✅ [RESOLT 2026-05-17] Fix #16 — Missatges del xat desapareixien al canviar de pestanya
+
+**Causa-arrel:** En canviar de pestanya, el navegador suspèn el WebSocket. En tornar,
+el dashboard es reconecta i rep `history` del servidor. Si el servidor retorna buit,
+`chat-messages.innerHTML = ''` esborrava tots els missatges.
+**Fix:** Buffer `_localMessages` al JS del dashboard. Totes les funcions que manipulen
+missatges (`addChatMessage`, `finishMessage`, `selectThread`, `deleteThread`, clear-all)
+sincronitzen el buffer. El handler `history` preserva missatges locals si el servidor
+retorna buit.
+
+### ✅ [RESOLT 2026-05-17] `bartolo-goal.mjs` — Automatització Playwright del muntatge
+
+Script Node.js que automatitza el muntatge de repos via el dashboard :9999:
+- Llegeix `.env.local` (format `KEY=VALUE`), verifica 9 claus requerides
+- Pobla la cache de secrets (`~/.universal-agent/secrets.json`)
+- Obre Chromium, navega al dashboard, crea xat nou
+- Envia `munta <repo_path>`, gestiona wizard pas a pas (workspace, secrets, cloud_choice, confirm)
+- Captura tota la sessió: transcript markdown (sanititzat), screenshots cada 60s, meta.json
+- Sanitització: JWTs, claus Supabase, strings alta entropia → `<REDACTED>`
+- Timeout 6h, detecció de finalització per patrons + 15s quiescència
+- Sortida a `runs/<timestamp>/`
 
 ## Problemes coneguts pendents
 

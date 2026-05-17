@@ -732,6 +732,7 @@ let _threads = [];
 let _inputHistory = [];
 let _historyIdx = -1;
 let _savedInput = '';
+	let _localMessages = [];  // buffer local per sobreviure a reconnexions WebSocket
 
 function connectWS() {
   if (ws && ws.readyState === WebSocket.OPEN) return;
@@ -757,9 +758,19 @@ function connectWS() {
         else addChatMessage('system', 'Executant: ' + esc(data.action));
       }
       else if (data.type === 'history') {
+        // Preservar missatges locals si el servidor retorna buit (reconnexió WebSocket)
+        var msgs = data.messages || [];
+        if (!msgs.length && _localMessages.length) {
+          // El servidor no té missatges — preservem els locals
+          return;
+        }
         document.getElementById('chat-messages').innerHTML = '';
         currentMsgEl = null;
-        (data.messages||[]).forEach(m => addChatMessage(m.role, m.content));
+        _localMessages = [];
+        msgs.forEach(function(m) {
+          _localMessages.push({role: m.role, content: m.content});
+          addChatMessage(m.role, m.content);
+        });
       }
       else if (data.type === 'wizard_step') { renderWizardStep(data); }
       else if (data.type === 'wizard_done') {
@@ -884,6 +895,7 @@ function addChatMessage(role, text, raw) {
   _addTime(el);
   _addCopyBtn(el);
   document.getElementById('chat-messages').appendChild(el);
+  _localMessages.push({role: role, content: raw || text});
   el.scrollIntoView({behavior:'smooth'});
 }
 function appendToken(token) {
@@ -906,6 +918,7 @@ function finishMessage() {
     currentMsgEl.setAttribute('data-raw', raw);
     _addTime(currentMsgEl);
     _addCopyBtn(currentMsgEl);
+    _localMessages.push({role: 'assistant', content: raw});
   }
   currentMsgEl = null;
 }
@@ -1391,6 +1404,7 @@ async function selectThread(id, silent) {
   localStorage.setItem('bartolo-thread', id);
   document.getElementById('chat-messages').innerHTML = '';
   currentMsgEl = null;
+  _localMessages = [];
   // Load messages from server
   try {
     const r = await apiFetch('/api/chat/threads/' + encodeURIComponent(id));
@@ -1425,6 +1439,7 @@ async function deleteThread(id) {
   await apiFetch('/api/chat/threads/' + encodeURIComponent(id), {method:'DELETE'});
   if (_currentThreadId === id) {
     _currentThreadId = null;
+    _localMessages = [];
     document.getElementById('chat-messages').innerHTML = '';
     document.getElementById('chat-title').textContent = 'Xat nou';
     localStorage.removeItem('bartolo-thread');
@@ -1458,6 +1473,7 @@ document.getElementById('clear-threads-btn').addEventListener('click', async fun
   }
   _threads = [];
   _currentThreadId = null;
+  _localMessages = [];
   document.getElementById('chat-messages').innerHTML = '';
   document.getElementById('chat-title').textContent = 'Xat nou';
   localStorage.removeItem('bartolo-thread');
@@ -1565,7 +1581,7 @@ function renderRepos(data) {
       h += '<div class="card" style="border-left-color:var(--accent2)">';
       h += '<div style="display:flex;justify-content:space-between;align-items:center">';
       h += '<strong style="color:var(--accent2)">'+dbTypeIcon+' '+esc(db.type)+'</strong>';
-      h += '<span style="font-size:10px;color:var(--muted)">'+esc(db.container||'')+'</span>';
+      h += '<span style="font-size:10px;color:var(--muted)">'+esc(db.container||'')+(db.repo?' <span style="color:var(--accent);font-weight:500">['+esc(db.repo)+']</span>':'')+'</span>';
       h += '</div>';
       h += '<div style="font-size:11px;margin-top:6px;color:var(--fg)">';
       h += '<span style="color:var(--muted)">host:</span> localhost:' + esc(String(db.port||'?')) + ' &middot; ';

@@ -24,6 +24,26 @@ from bartolo.dashboard.templates import render_logs
 router = APIRouter()
 AGENT_SCRIPT = PROJECT_ROOT / "universal_repo_agent_v5.py"
 
+# Mapeig container Docker → repo propietari
+def _load_container_owner_map(workspace):
+    """Carrega el mapeig {container_name: repo_name}."""
+    import json as _json
+    f = Path(workspace) / ".container_owners.json"
+    if f.exists():
+        try:
+            return _json.loads(f.read_text())
+        except Exception:
+            pass
+    return {}
+
+def _save_container_owner_map(workspace, owners):
+    """Guarda el mapeig {container_name: repo_name}."""
+    import json as _json, os as _os
+    f = Path(workspace) / ".container_owners.json"
+    tmp = Path(workspace) / ".container_owners_tmp"
+    tmp.write_text(_json.dumps(owners, indent=2, ensure_ascii=False))
+    _os.replace(tmp, f)
+
 # Ports coneguts per identificar serveis sense info de procés
 _KNOWN_PORTS = {
     11434: ("Ollama", "ollama"),
@@ -180,6 +200,7 @@ async def api_status():
         )
         if r.returncode == 0 and r.stdout.strip():
             from bartolo.provisioner import DB_DOCKER_CONFIGS
+            owners = _load_container_owner_map(DEFAULT_WORKSPACE)
             databases = []
             for line in r.stdout.strip().splitlines():
                 parts = line.strip().split(maxsplit=1)
@@ -194,6 +215,7 @@ async def api_status():
                             "container": container,
                             "port": port,
                             "connection_url": cfg.get("url_template", ""),
+                            "repo": owners.get(container, ""),
                         })
             if databases:
                 data["_databases"] = databases

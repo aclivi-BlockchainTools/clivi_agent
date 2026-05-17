@@ -14,3 +14,5 @@ bench_results/
 .agent_logs/
 .DS_Store
 .superpowers/
+node_modules/
+runs/

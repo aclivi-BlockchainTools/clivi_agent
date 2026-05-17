@@ -1119,6 +1119,30 @@ async def _finalize_wizard(ws: WebSocket, thread_id: str, wiz: WizardState) -> N
     if container_lines:
         save_secrets_cache(cache)
 
+    # Save container → repo mapping for database ownership display
+    repo_name = ""
+    if wiz.repo_url:
+        import re as _re2
+        m = _re2.search(r'([^/]+?)(?:\.git)?$', wiz.repo_url.rstrip('/'))
+        if m:
+            repo_name = m.group(1)
+    if not repo_name:
+        repo_name = Path(wiz.workspace or str(DEFAULT_WORKSPACE)).name if wiz.workspace and Path(wiz.workspace).name != str(DEFAULT_WORKSPACE).rstrip('/').split('/')[-1] else ""
+    if repo_name:
+        from bartolo.dashboard.repos_routes import _save_container_owner_map as _save_com
+        from bartolo.dashboard.repos_routes import _load_container_owner_map as _load_com
+        owners = _load_com(DEFAULT_WORKSPACE)
+        for svc, choice in wiz.cloud_choices.items():
+            if choice == "local":
+                local_db = _C2L.get(svc)
+                if local_db:
+                    cfg = DB_DOCKER_CONFIGS.get(local_db)
+                    if cfg:
+                        owners[cfg["container"]] = repo_name
+        if wiz.supabase_migrate and "agent-postgres" not in owners:
+            owners["agent-postgres"] = repo_name
+        _save_com(DEFAULT_WORKSPACE, owners)
+
     # Clear wizard state
     _wizard_states.pop(thread_id, None)
 
