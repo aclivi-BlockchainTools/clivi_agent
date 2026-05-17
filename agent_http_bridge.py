@@ -92,9 +92,8 @@ def _gc_old_jobs() -> None:
 
 
 def _run_agent_async(job_id: str, args: list, timeout: int) -> None:
-    import time as _time
+    import time as _time, gc as _gc
     cmd = [sys.executable, str(AGENT_PATH)] + args
-    # Fix 2: fitxer de log per job, evita acumular output en RAM
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = LOG_DIR / f"{job_id}.log"
     with _JOBS_LOCK:
@@ -105,15 +104,11 @@ def _run_agent_async(job_id: str, args: list, timeout: int) -> None:
         with _JOBS_LOCK:
             _JOBS[job_id]["pid"] = proc.pid
             _JOBS[job_id]["status"] = "running"
-        # Fix 1: sliding window de 500 línies en RAM (elimina les primeres 100 quan s'omple)
-        output_lines: list = []
+        # Stream output directament a disc — no acumular res en RAM
         with open(log_path, "w", encoding="utf-8") as log_f:
             for line in proc.stdout:  # type: ignore
-                log_f.write(line)   # Fix 2: escriu a disc en streaming
+                log_f.write(line)
                 log_f.flush()
-                output_lines.append(line)
-                if len(output_lines) >= 500:
-                    del output_lines[:100]  # Fix 1: descarta les més antigues
         try:
             rc = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -121,16 +116,18 @@ def _run_agent_async(job_id: str, args: list, timeout: int) -> None:
             rc = -1
             with open(log_path, "a", encoding="utf-8") as log_f:
                 log_f.write(f"\n[bridge] TIMEOUT {timeout}s\n")
-        # Parse escalation reports des del fitxer (una sola lectura al final)
+        # Parse escalation reports des del fitxer
         error_reports: list = []
         if rc != 0:
             import re as _re, json as _json
             try:
-                full_out = log_path.read_text(encoding="utf-8", errors="replace")
+                # Llegeix només les primeres 500KB per buscar reports d'escalació
+                with open(log_path, "r", encoding="utf-8", errors="replace") as _f:
+                    full_out = _f.read(524288)
                 for _path_str in _re.findall(r"__ESCALATION_REPORT__=(.+)", full_out):
                     try:
-                        with open(_path_str.strip()) as _f:
-                            error_reports.append(_json.load(_f))
+                        with open(_path_str.strip()) as _f2:
+                            error_reports.append(_json.load(_f2))
                     except Exception as _err:
                         sys.stderr.write(f"[bridge] escalation parse error: {_err}\n")
             except Exception:
@@ -152,6 +149,7 @@ def _run_agent_async(job_id: str, args: list, timeout: int) -> None:
             pass
     finally:
         _gc_old_jobs()
+        _gc.collect()  # Alliberar memòria després de cada job
 
 
 def _start_job(args: list, timeout: int = LAUNCH_TIMEOUT) -> str:
@@ -214,16 +212,33 @@ def _job_stream(job_id: str, n: int = 50) -> Optional[Dict[str, Any]]:
 
 def _run_agent(args: list, timeout: int = 60) -> dict:
     cmd = [sys.executable, str(AGENT_PATH)] + args
+    import tempfile as _tf, gc as _gc
+    out_f = _tf.NamedTemporaryFile(mode="w+", suffix=".log", delete=False, encoding="utf-8", errors="replace")
+    err_f = _tf.NamedTemporaryFile(mode="w+", suffix=".log", delete=False, encoding="utf-8", errors="replace")
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        out = (r.stdout or "") + (("\n--- STDERR ---\n" + r.stderr) if r.stderr else "")
+        proc = subprocess.Popen(cmd, stdout=out_f, stderr=err_f, text=True)
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            out_f.write("\n[bridge] TIMEOUT\n")
+        out_f.close()
+        err_f.close()
+        # Llegeix només les últimes línies dels fitxers (max 6000 chars)
+        out = Path(out_f.name).read_text(errors="replace")
+        err = Path(err_f.name).read_text(errors="replace")
+        if err:
+            out += "\n--- STDERR ---\n" + err
         if len(out) > MAX_RESPONSE_CHARS:
             out = f"... [truncat] ...\n" + out[-MAX_RESPONSE_CHARS:]
-        return {"returncode": r.returncode, "output": out, "ok": r.returncode == 0}
-    except subprocess.TimeoutExpired:
-        return {"error": f"Timeout {timeout}s", "returncode": -1, "output": ""}
+        _gc.collect()
+        return {"returncode": proc.returncode, "output": out, "ok": proc.returncode == 0}
     except Exception as e:
         return {"error": str(e), "returncode": -99, "output": ""}
+    finally:
+        Path(out_f.name).unlink(missing_ok=True)
+        Path(err_f.name).unlink(missing_ok=True)
 
 
 
@@ -266,17 +281,27 @@ def _shell_safe(cmd):
     return not any(kw in low for kw in SHELL_BLOCKED)
 
 def _shell_execute(cmd, timeout=30):
+    import tempfile as _tf_shell, os as _os_shell
+    out_f = _tf_shell.NamedTemporaryFile(mode="w+", suffix=".log", delete=False, encoding="utf-8", errors="replace")
     try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
-                           timeout=timeout, executable="/bin/bash")
-        out = (r.stdout or "") + (("\n[STDERR]\n" + r.stderr) if r.stderr else "")
+        proc = subprocess.Popen(cmd, shell=True, stdout=out_f, stderr=subprocess.STDOUT,
+                                executable="/bin/bash")
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            out_f.write(f"\n[bridge] Timeout ({timeout}s)\n")
+        out_f.close()
+        out_text = Path(out_f.name).read_text(errors="replace")
+        out = out_text
         if len(out) > MAX_RESPONSE_CHARS:
             out = out[-MAX_RESPONSE_CHARS:]
-        return {"returncode": r.returncode, "output": out, "ok": r.returncode == 0}
-    except subprocess.TimeoutExpired:
-        return {"returncode": -1, "output": f"Timeout ({timeout}s)", "ok": False}
+        return {"returncode": proc.returncode, "output": out, "ok": proc.returncode == 0}
     except Exception as e:
         return {"returncode": -99, "output": f"Error: {e}", "ok": False}
+    finally:
+        Path(out_f.name).unlink(missing_ok=True)
 
 UPLOAD_DIR = WORKSPACE / "_uploads"
 UPLOAD_HTML = """<!DOCTYPE html>
@@ -718,9 +743,22 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if parsed.path == "/health":
+            import os as _os_health, gc as _gc_health
+            _gc_health.collect()
+            mem_bytes = 0
+            try:
+                with open(f"/proc/{_os_health.getpid()}/status") as _st:
+                    for _l in _st:
+                        if _l.startswith("VmRSS:"):
+                            mem_bytes = int(_l.split()[1]) * 1024
+                            break
+            except Exception:
+                pass
             self._json(200, {"status": "ok", "agent_path": str(AGENT_PATH),
                              "agent_exists": AGENT_PATH.exists(), "workspace": str(WORKSPACE),
-                             "public_url": _get_public_url(_PORT)})
+                             "public_url": _get_public_url(_PORT),
+                             "memory_mb": round(mem_bytes / 1048576, 1),
+                             "jobs_count": len(_JOBS)})
         elif parsed.path == "/status":
             self._json(200, _run_agent(["--workspace", str(WORKSPACE), "--status"], timeout=30))
         elif parsed.path == "/workspace/services":
@@ -746,11 +784,21 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(404, {"error": f"job {rest} no trobat"}); return
                 self._json(200, snap)
         elif parsed.path == "/jobs":
+            # Neteja jobs zombie (running > 2h)
+            import time as _t_now
             with _JOBS_LOCK:
+                _now = _t_now.time()
+                zombie = [j for j in _JOBS if _JOBS[j]["status"] == "running"
+                          and _now - _JOBS[j]["started_at"] > 7200]
+                for z in zombie:
+                    _JOBS[z]["status"] = "failed"
+                    _JOBS[z]["returncode"] = -99
+                    _JOBS[z]["finished_at"] = _now
                 summary = [{"id": j["id"], "status": j["status"],
                             "started_at": j["started_at"], "finished_at": j["finished_at"],
                             "returncode": j["returncode"]} for j in _JOBS.values()]
             summary.sort(key=lambda x: x["started_at"], reverse=True)
+            _gc_old_jobs()
             self._json(200, {"jobs": summary, "count": len(summary)})
         elif parsed.path.startswith("/wizard/"):
             wid = parsed.path.split("/wizard/", 1)[1].strip("/")
@@ -1396,6 +1444,14 @@ def main():
     print(f"   Endpoints  : POST /run /run/async /analyze /stop /refresh  ·  GET /status /logs /health /job/<id> /jobs")
     if AUTH_TOKEN:
         print(f"   Auth       : X-Auth-Token required")
+    # GC periòdic per evitar fragmentació de memòria
+    import gc as _periodic_gc
+    def _periodic_gc_thread():
+        while True:
+            _time.sleep(300)
+            _periodic_gc.collect()
+    threading.Thread(target=_periodic_gc_thread, daemon=True).start()
+
     server = ThreadingHTTPServer((args.bind, args.port), Handler)
     try:
         server.serve_forever()
