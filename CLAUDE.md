@@ -675,6 +675,51 @@ Script Node.js que automatitza el muntatge de repos via el dashboard :9999:
 - Timeout 6h, detecció de finalització per patrons + 15s quiescència
 - Sortida a `runs/<timestamp>/`
 
+### ✅ [RESOLT 2026-05-17] Fix #17 — Memory leak del bridge (910 MB → 25 MB)
+
+**Causa-arrel:** Dos mecanismes de kill simultanis:
+1. `systemd-oomd` matava la sessió sencera (dbus, gnome, pipewire...) perquè el
+   user slice (`user-1000.slice`) tenia un límit de 4.35 GB. Quan el bridge acumulava
+   500-910 MB, el total superava el límit → kill massiu.
+2. El systemd del bridge tenia `MemoryMax=500M` → SIGKILL directe si superava 500 MB.
+
+**Leaks al bridge:**
+- `_run_agent()` i `_shell_execute()` usaven `capture_output=True` →
+  emmagatzemaven TOTA la sortida del subprocés en RAM abans de truncar
+- `_run_agent_async()` mantenia `output_lines` (500 línies en RAM) que MAI es llegeix
+  (`_job_snapshot` i `_job_stream` llegeixen de DISC)
+- `log_path.read_text()` carregava el fitxer de log sencer per parsejar reports d'escalació
+
+**Fix:**
+- `_run_agent()` i `_shell_execute()`: `subprocess.Popen` amb fitxers temporals,
+  només últims 6000 chars en RAM
+- `_run_agent_async()`: eliminat `output_lines`, streaming directe a disc,
+  parseig d'escalació limitat a primers 500 KB
+- Health endpoint (`/health`): ara mostra `memory_mb` i `jobs_count`
+- Jobs zombie (>2h): neteja automàtica al handler `/jobs`
+- GC: thread periòdic cada 5 min + `gc.collect()` després de cada job
+- User slice: pujat de 4.35 GB → 8 GB amb `sudo systemctl set-property user-1000.slice MemoryMax=8G`
+
+Validat amb `bench.sh quick`: 6/6 (100%), bridge estable a 25.4 MB.
+
+### ⚠️ [INFO 2026-05-17] Límits de memòria del sistema
+
+El user slice (`user-1000.slice`) té un límit de memòria via cgroup v2.
+`systemd-oomd` està actiu i mata processos quan el slice supera el límit.
+
+```bash
+# Consultar límit i ús actual
+cat /sys/fs/cgroup/user.slice/user-1000.slice/memory.max   # bytes
+cat /sys/fs/cgroup/user.slice/user-1000.slice/memory.current
+
+# Consultar estat de systemd-oomd
+systemctl status systemd-oomd
+```
+
+El bridge té `MemoryMax=500M` al fitxer de service systemd
+(`~/.config/systemd/user/agent-bridge.service`). Si es vol monitoritzar,
+el `/health` endpoint retorna `memory_mb`.
+
 ## Problemes coneguts pendents
 
 Cap problema obert de prioritat alta o mitjana.
@@ -695,6 +740,7 @@ Cap problema obert de prioritat alta o mitjana.
 Afegits `StandardOutput=journal` i `StandardError=journal` per tenir logs centralitzats.
 Script `start-bartolo.sh` creat per arrancar Ollama + bridge + open-webui i executar bartolo-doctor.
 Logs: `journalctl --user -u agent-bridge -f`
+MemoryMax=500M — el health endpoint (`/health`) mostra `memory_mb` per monitoritzar.
 
 ## Convencions de codi descobertes
 
