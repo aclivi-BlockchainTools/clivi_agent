@@ -55,14 +55,18 @@ def _extract_error_type(stderr: str) -> str:
 
 
 def _read_api_key() -> Optional[str]:
-    """Llegeix l'API key de DeepSeek des de l'entorn o secrets.json."""
+    """Llegeix l'API key de DeepSeek des de l'entorn o secrets.json.
+
+    Busca en ordre: DEEPSEEK_API_KEY (env) → DEEPSEEK_API_KEY (cache) → deepseek_api_key (cache).
+    """
     key = os.environ.get("DEEPSEEK_API_KEY")
     if key:
         return key
     secrets_path = os.path.expanduser("~/.universal-agent/secrets.json")
     try:
         secrets = json.loads(open(secrets_path, encoding="utf-8").read())
-        return secrets.get("deepseek_api_key")
+        # El dashboard guarda com DEEPSEEK_API_KEY, el codi antic usava deepseek_api_key
+        return secrets.get("DEEPSEEK_API_KEY") or secrets.get("deepseek_api_key")
     except Exception:
         return None
 

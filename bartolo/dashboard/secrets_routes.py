@@ -55,6 +55,7 @@ def _classify_key(key_name: str) -> str:
 async def list_secrets():
     data = _load()
     secrets = {}
+    # Show existing keys from cache
     for k, v in data.items():
         if k.startswith("_"):
             continue
@@ -69,6 +70,18 @@ async def list_secrets():
             "color": meta["color"],
             "active": not data.get(f"_{k}_disabled", False),
         }
+    # Always include known key types even if not configured
+    for kt in KEY_TYPES:
+        if kt not in secrets:
+            secrets[kt] = {
+                "value": None,
+                "masked": False,
+                "type": _classify_key(kt),
+                "provider": KEY_TYPES[kt]["provider"],
+                "icon": KEY_TYPES[kt]["icon"],
+                "color": KEY_TYPES[kt]["color"],
+                "active": False,
+            }
     return {"secrets": secrets, "known_key_types": list(KEY_TYPES.keys()), "other_key_names": OTHER_KEY_NAMES}
 
 

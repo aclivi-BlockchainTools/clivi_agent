@@ -22,7 +22,8 @@ def _read_api_key() -> Optional[str]:
             return val
     try:
         secrets = json.loads(_SECRETS_PATH.read_text(encoding="utf-8"))
-        return secrets.get("anthropic_api_key")
+        # El dashboard guarda com ANTHROPIC_API_KEY, el codi antic usava anthropic_api_key
+        return secrets.get("ANTHROPIC_API_KEY") or secrets.get("anthropic_api_key")
     except Exception:
         return None
 
